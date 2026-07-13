@@ -1142,8 +1142,28 @@ fallback_access_link() {
   printf 'https://t.me/proxy?server=%s&port=%s&secret=%s\n' "${server}" "${PORT}" "${secret}"
 }
 
+public_access_link_from() {
+  local link server safe_server safe_port
+
+  link="$1"
+  server="$(detect_public_server)"
+
+  [[ -n "${link}" && -n "${server}" && -n "${PORT:-}" ]] || return 1
+
+  safe_server="$(printf '%s' "${server}" | sed 's/[\/&]/\\&/g')"
+  safe_port="$(printf '%s' "${PORT}" | sed 's/[\/&]/\\&/g')"
+  printf '%s\n' "${link}" | sed -E "s#([?&]server=)[^&]*#\1${safe_server}#; s#([?&]port=)[0-9]+#\1${safe_port}#"
+}
+
+official_access_link() {
+  awk -F'"' '
+    /"tme_url"[[:space:]]*:/ { print $4; exit }
+    /"tg_url"[[:space:]]*:/ { print $4; exit }
+  '
+}
+
 access_info() {
-  local output link
+  local output link official_link
   output="$(
     docker exec "${CONTAINER_NAME}" /mtg access /config.toml 2>/dev/null \
       || docker run --rm -v "${CONFIG_FILE}:/config.toml:ro" "nineseconds/mtg:${MTG_TAG}" access /config.toml 2>/dev/null \
@@ -1151,13 +1171,21 @@ access_info() {
   )"
   [[ -n "${output}" ]] && printf '%s\n' "${output}"
 
-  link="$(fallback_access_link || true)"
+  official_link="$(printf '%s\n' "${output}" | official_access_link || true)"
+  if [[ -n "${official_link}" ]]; then
+    link="$(public_access_link_from "${official_link}" || true)"
+  fi
+
+  if [[ -z "${link:-}" ]]; then
+    link="$(fallback_access_link || true)"
+  fi
+
   if [[ -n "${link}" ]]; then
     echo
     echo "Public access link:"
     printf '%s\n' "${link}"
   else
-    link="$(printf '%s\n' "${output}" | awk 'match($0, /(https:\/\/t\.me\/proxy[^[:space:]]+|tg:\/\/proxy[^[:space:]]+)/) { print substr($0, RSTART, RLENGTH); exit }')"
+    link="$(printf '%s\n' "${output}" | awk 'match($0, /(https:\/\/t\.me\/proxy[^[:space:]",]+|tg:\/\/proxy[^[:space:]",]+)/) { print substr($0, RSTART, RLENGTH); exit }')"
   fi
 
   [[ "${1:-}" == "--no-qr" ]] || print_qr "${link}"
