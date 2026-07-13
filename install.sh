@@ -1151,13 +1151,13 @@ access_info() {
   )"
   [[ -n "${output}" ]] && printf '%s\n' "${output}"
 
-  link="$(printf '%s\n' "${output}" | awk 'match($0, /(https:\/\/t\.me\/proxy[^[:space:]]+|tg:\/\/proxy[^[:space:]]+)/) { print substr($0, RSTART, RLENGTH); exit }')"
-  if [[ -z "${link}" ]]; then
-    link="$(fallback_access_link || true)"
-    if [[ -n "${link}" ]]; then
-      echo "Fallback access link:"
-      printf '%s\n' "${link}"
-    fi
+  link="$(fallback_access_link || true)"
+  if [[ -n "${link}" ]]; then
+    echo
+    echo "Public access link:"
+    printf '%s\n' "${link}"
+  else
+    link="$(printf '%s\n' "${output}" | awk 'match($0, /(https:\/\/t\.me\/proxy[^[:space:]]+|tg:\/\/proxy[^[:space:]]+)/) { print substr($0, RSTART, RLENGTH); exit }')"
   fi
 
   [[ "${1:-}" == "--no-qr" ]] || print_qr "${link}"
