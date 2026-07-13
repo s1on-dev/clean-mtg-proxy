@@ -9,10 +9,10 @@ speedtest, BBR/NAT-диагностикой и безопасной ротаци
 
 ## Быстрая установка
 
-Стабильная команда для релиза `v1.0.0`:
+Стабильная команда для релиза `v1.0.1`:
 
 ```bash
-curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.0/install.sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.1/install.sh
 sudo bash install.sh
 ```
 
@@ -26,7 +26,7 @@ sudo bash install.sh
 Быстрая установка без меню:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.0/install.sh \
+curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.1/install.sh \
   | sudo bash -s -- --domain digitalocean.com --port 443
 ```
 
@@ -183,7 +183,7 @@ sudo mtgctl uninstall --purge
 Перед запуском на сервере можно скачать и посмотреть скрипт:
 
 ```bash
-curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.0/install.sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.1/install.sh
 less install.sh
 sudo bash install.sh
 ```
