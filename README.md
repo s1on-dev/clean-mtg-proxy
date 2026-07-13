@@ -9,10 +9,10 @@ speedtest, BBR/NAT-диагностикой и безопасной ротаци
 
 ## Быстрая установка
 
-Стабильная команда для релиза `v1.0.1`:
+Стабильная команда для релиза `v1.0.2`:
 
 ```bash
-curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.1/install.sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.2/install.sh
 sudo bash install.sh
 ```
 
@@ -26,9 +26,13 @@ sudo bash install.sh
 Быстрая установка без меню:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.1/install.sh \
-  | sudo bash -s -- --domain digitalocean.com --port 443
+curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.2/install.sh \
+  | sudo bash -s -- --domain proxy.your-domain.com --port 443
 ```
+
+Замените `proxy.your-domain.com` на домен, которым вы управляете. Он должен
+резолвиться A-записью в публичный IPv4 вашего VPS. Не используйте
+`example.com`, `digitalocean.com`, `hetzner.com` или другие чужие домены.
 
 `--domain` нужен для FakeTLS-secret. Самый надежный вариант - домен, которым вы
 управляете, с A-записью на публичный IPv4 VPS и реальным HTTPS-сайтом на `443`.
@@ -81,17 +85,18 @@ sudo mtgctl qr
 ## Полезные флаги
 
 ```bash
-sudo bash install.sh --domain digitalocean.com --port 443
-sudo bash install.sh --domain hetzner.com --prefer-ip prefer-ipv4 --concurrency 16384
-sudo bash install.sh --domain example.com --secret-label family
-sudo bash install.sh --domain example.com --allowlist "203.0.113.10/32,198.51.100.0/24"
-sudo bash install.sh --domain example.com --nginx-disguise --disguise-port 80
-sudo bash install.sh --domain example.com --bbr-nat-check
-sudo bash install.sh --domain example.com --enable-blocklist
-sudo bash install.sh --domain example.com --blocklist https://iplists.firehol.org/files/firehol_abusers_1d.netset
-sudo bash install.sh --domain example.com --strict-doctor
-sudo bash install.sh --domain example.com --skip-firewall
-sudo bash install.sh --domain example.com --skip-docker-install
+sudo bash install.sh --domain proxy.your-domain.com --port 443
+sudo bash install.sh --domain proxy.your-domain.com --prefer-ip prefer-ipv4 --concurrency 16384
+sudo bash install.sh --domain proxy.your-domain.com --secret-label family
+sudo bash install.sh --domain proxy.your-domain.com --allowlist "203.0.113.10/32,198.51.100.0/24"
+sudo bash install.sh --domain proxy.your-domain.com --nginx-disguise --disguise-port 80
+sudo bash install.sh --domain proxy.your-domain.com --disable-nginx-disguise
+sudo bash install.sh --domain proxy.your-domain.com --bbr-nat-check
+sudo bash install.sh --domain proxy.your-domain.com --enable-blocklist
+sudo bash install.sh --domain proxy.your-domain.com --blocklist https://iplists.firehol.org/files/firehol_abusers_1d.netset
+sudo bash install.sh --domain proxy.your-domain.com --strict-doctor
+sudo bash install.sh --domain proxy.your-domain.com --skip-firewall
+sudo bash install.sh --domain proxy.your-domain.com --skip-docker-install
 ```
 
 ## Nginx Disguise И Allowlist
@@ -131,7 +136,7 @@ Nginx disguise, он также открывает HTTP-порт disguise-про
 Для временного iptables-правила можно использовать:
 
 ```bash
-sudo bash install.sh --domain digitalocean.com --iptables-fallback
+sudo bash install.sh --domain proxy.your-domain.com --iptables-fallback
 ```
 
 ## Blocklist
@@ -183,7 +188,7 @@ sudo mtgctl uninstall --purge
 Перед запуском на сервере можно скачать и посмотреть скрипт:
 
 ```bash
-curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.1/install.sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.2/install.sh
 less install.sh
 sudo bash install.sh
 ```

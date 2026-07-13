@@ -46,7 +46,7 @@ Clean mtg MTProto proxy installer.
 
 Usage:
   sudo bash install.sh
-  sudo bash install.sh --domain example.com [options]
+  sudo bash install.sh --domain your-real-domain.com [options]
 
 Required:
   --domain DOMAIN          FakeTLS/domain-fronting hostname used to generate secret.
@@ -66,7 +66,8 @@ Options:
   --blocklist URL          FireHOL-compatible blocklist URL and enable it
   --allowlist CIDRS        Enable mtg allowlist. CIDRs may be comma or space separated.
   --nginx-disguise         Install a quiet Nginx HTTP decoy site
-  --disguise-server-name N Server name for Nginx decoy, default: _
+  --disable-nginx-disguise Disable Nginx HTTP decoy site
+  --disguise-server-name N Server name for Nginx decoy, default: DOMAIN
   --disguise-port PORT     HTTP port for Nginx decoy, default: 80
   --bbr-nat-check          Run optional BBR/NAT diagnostics after install
   --skip-docker-install    Require Docker to be already installed
@@ -82,10 +83,10 @@ Options:
 
 Examples:
   sudo bash install.sh
-  sudo bash install.sh --domain digitalocean.com
-  sudo DOMAIN=digitalocean.com bash install.sh
+  sudo bash install.sh --domain proxy.your-domain.com
+  sudo DOMAIN=proxy.your-domain.com bash install.sh
   curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/main/install.sh \
-    | sudo bash -s -- --domain digitalocean.com --port 443
+    | sudo bash -s -- --domain proxy.your-domain.com --port 443
 EOF
 }
 
@@ -289,7 +290,7 @@ prompt_install_settings() {
 
   print_settings
   echo
-  prompt_value "FakeTLS domain" DOMAIN "${DOMAIN:-digitalocean.com}"
+  prompt_value "FakeTLS domain" DOMAIN "${DOMAIN:-proxy.your-domain.com}"
   prompt_value "Public port" PORT "${PORT:-443}"
   prompt_value "Docker image tag" MTG_TAG "${MTG_TAG:-2.2.8}"
   prompt_prefer_ip
@@ -312,7 +313,7 @@ prompt_install_settings() {
 
   if prompt_yes_no "Enable Nginx HTTP disguise profile" "${ENABLE_NGINX_DISGUISE:-0}"; then
     ENABLE_NGINX_DISGUISE=1
-    prompt_value "Nginx server_name" DISGUISE_SERVER_NAME "${DISGUISE_SERVER_NAME:-_}"
+    prompt_value "Nginx server_name" DISGUISE_SERVER_NAME "${DISGUISE_SERVER_NAME:-${DOMAIN:-_}}"
     prompt_value "Nginx HTTP port" DISGUISE_HTTP_PORT "${DISGUISE_HTTP_PORT:-80}"
   else
     ENABLE_NGINX_DISGUISE=0
@@ -460,7 +461,7 @@ EOF
     1)
       prompt_value "Secret label" label "default"
       validate_secret_label "${label}"
-      prompt_value "FakeTLS domain for this secret" domain "${DOMAIN:-digitalocean.com}"
+      prompt_value "FakeTLS domain for this secret" domain "${DOMAIN:-proxy.your-domain.com}"
       read -r -p "Paste existing secret or leave empty to generate: " imported
 
       DOMAIN="${domain}"
@@ -524,7 +525,7 @@ menu_secret_revoke() {
     else
       warn "No saved secrets left. Generate a replacement now."
       SECRET=""
-      prompt_value "FakeTLS domain" DOMAIN "${DOMAIN:-digitalocean.com}"
+      prompt_value "FakeTLS domain" DOMAIN "${DOMAIN:-proxy.your-domain.com}"
       SECRET="$(generate_secret_for_domain "${DOMAIN}")"
       ACTIVE_SECRET_LABEL="default"
       store_secret "${ACTIVE_SECRET_LABEL}" "${DOMAIN}" "${SECRET}"
@@ -536,7 +537,7 @@ menu_secret_revoke() {
 menu_secret_regenerate() {
   load_state
   ensure_docker
-  prompt_value "FakeTLS domain" DOMAIN "${DOMAIN:-digitalocean.com}"
+  prompt_value "FakeTLS domain" DOMAIN "${DOMAIN:-proxy.your-domain.com}"
   prompt_value "Active secret label" ACTIVE_SECRET_LABEL "${ACTIVE_SECRET_LABEL:-default}"
   SECRET="$(generate_secret_for_domain "${DOMAIN}")"
   store_secret "${ACTIVE_SECRET_LABEL}" "${DOMAIN}" "${SECRET}"
@@ -560,7 +561,7 @@ menu_profiles() {
 
   if prompt_yes_no "Enable Nginx HTTP disguise profile" "${ENABLE_NGINX_DISGUISE:-0}"; then
     ENABLE_NGINX_DISGUISE=1
-    prompt_value "Nginx server_name" DISGUISE_SERVER_NAME "${DISGUISE_SERVER_NAME:-_}"
+    prompt_value "Nginx server_name" DISGUISE_SERVER_NAME "${DISGUISE_SERVER_NAME:-${DOMAIN:-_}}"
     prompt_value "Nginx HTTP port" DISGUISE_HTTP_PORT "${DISGUISE_HTTP_PORT:-80}"
   else
     ENABLE_NGINX_DISGUISE=0
@@ -687,6 +688,8 @@ parse_args() {
         ENABLE_ALLOWLIST=1; ALLOWLIST_CIDRS="${2:-}"; shift 2 ;;
       --nginx-disguise)
         ENABLE_NGINX_DISGUISE=1; shift ;;
+      --disable-nginx-disguise)
+        ENABLE_NGINX_DISGUISE=0; shift ;;
       --disguise-server-name)
         DISGUISE_SERVER_NAME="${2:-}"; shift 2 ;;
       --disguise-port)
@@ -733,12 +736,18 @@ normalize_allowlist_cidrs() {
 
 validate_input() {
   if [[ -z "${DOMAIN}" && -t 0 ]]; then
-    read -r -p "FakeTLS domain, for example digitalocean.com: " DOMAIN
+    read -r -p "FakeTLS domain that resolves to this VPS IPv4: " DOMAIN
   fi
 
-  [[ -n "${DOMAIN}" ]] || die "Missing --domain. Example: --domain digitalocean.com"
+  [[ -n "${DOMAIN}" ]] || die "Missing --domain. Use a real domain you control, for example --domain proxy.your-domain.com"
   [[ "${DOMAIN}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Domain contains unsupported characters: ${DOMAIN}"
   [[ "${DOMAIN}" != .* && "${DOMAIN}" != *..* && "${DOMAIN}" == *.* ]] || die "Domain looks invalid: ${DOMAIN}"
+
+  case "${DOMAIN}" in
+    example.com|example.net|example.org)
+      die "${DOMAIN} is a documentation placeholder. Use a real domain with an A record to this VPS IPv4."
+      ;;
+  esac
 
   [[ "${PORT}" =~ ^[0-9]+$ ]] || die "Port must be a number"
   (( PORT >= 1 && PORT <= 65535 )) || die "Port must be between 1 and 65535"
@@ -1577,6 +1586,8 @@ open_disguise_firewall() {
 }
 
 configure_nginx_disguise() {
+  local server_name
+
   if [[ "${ENABLE_NGINX_DISGUISE}" -ne 1 ]]; then
     if [[ -f "${NGINX_SITE_FILE}" ]]; then
       log "Disabling Nginx disguise profile"
@@ -1593,6 +1604,10 @@ configure_nginx_disguise() {
   install_nginx_package
   log "Writing Nginx disguise profile"
   mkdir -p "${NGINX_WEB_ROOT}"
+  server_name="${DISGUISE_SERVER_NAME}"
+  if [[ "${server_name}" == "_" && -n "${DOMAIN}" ]]; then
+    server_name="${DOMAIN}"
+  fi
 
   cat > "${NGINX_WEB_ROOT}/index.html" <<'EOF'
 <!doctype html>
@@ -1620,7 +1635,7 @@ EOF
 server {
     listen ${DISGUISE_HTTP_PORT};
     listen [::]:${DISGUISE_HTTP_PORT};
-    server_name ${DISGUISE_SERVER_NAME};
+    server_name ${server_name};
 
     root ${NGINX_WEB_ROOT};
     index index.html;
