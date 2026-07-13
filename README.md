@@ -1,54 +1,56 @@
 # Clean MTG Proxy Installer
 
-Чистый установщик MTProto-прокси для Telegram на базе `nineseconds/mtg` v2. По умолчанию используется закреплённый Docker-тег `2.2.8`.
+Чистый установщик MTProto-прокси для Telegram на базе `nineseconds/mtg` v2.
+По умолчанию используется закрепленный Docker-тег `2.2.8`.
 
-Цель проекта: один понятный скрипт для VPS без рекламы, с нормальным Docker/systemd-запуском, firewall, `mtg doctor`, логами и базовым тестом скорости.
-
-## Что ставится
-
-- Docker, если его ещё нет.
-- `/etc/mtg/config.toml` с FakeTLS-secret и безопасными дефолтами.
-- `systemd`-service `mtg.service`.
-- Docker-контейнер `mtg-proxy`.
-- Утилита управления `mtgctl`.
-- Правило firewall для TCP-порта, если активен `ufw` или `firewalld`.
-
-Схема работы описана в [ARCHITECTURE.md](ARCHITECTURE.md).
+Цель проекта: один понятный скрипт для любого обычного Linux VPS без рекламы,
+с нормальным Docker/systemd-запуском, firewall, `mtg doctor`, логами, QR-кодом,
+speedtest, BBR/NAT-диагностикой и безопасной ротацией secret.
 
 ## Быстрая установка
 
-После публикации репозитория на GitHub команда будет такой:
+Стабильная команда для релиза `v1.0.0`:
 
-Интерактивное меню на VPS:
+```bash
+curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.0/install.sh
+sudo bash install.sh
+```
+
+Последняя версия из `main`:
 
 ```bash
 curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/main/install.sh
 sudo bash install.sh
 ```
 
-В меню будут пункты:
-
-- установка или обновление прокси;
-- изменение домена, порта, Docker-тега, IP-режима, DNS и лимитов;
-- вывод ссылки `tg://proxy` / `https://t.me/proxy`;
-- статус, логи, `mtg doctor`, speedtest и перезапуск;
-- удаление прокси с возможностью оставить или удалить `/etc/mtg`.
-
 Быстрая установка без меню:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.0/install.sh \
   | sudo bash -s -- --domain digitalocean.com --port 443
 ```
 
-Локальный запуск из клона:
+`--domain` нужен для FakeTLS-secret. Лучше выбирать домен осмысленно: например,
+домен провайдера VPS или CDN/сервиса, который выглядит логично для маршрута.
 
-```bash
-sudo bash install.sh
-sudo bash install.sh --domain digitalocean.com --port 443
-```
+## Меню
 
-`--domain` нужен для FakeTLS-secret. Лучше выбирать домен осмысленно: не `google.com` на случайном VPS, а домен, который выглядит логично для вашего хостинга/маршрута. Если есть сомнения, начните с домена провайдера VPS и проверьте результат через `sudo mtgctl doctor`.
+При запуске `sudo bash install.sh` без параметров откроется меню:
+
+- установка или обновление прокси;
+- изменение домена, порта, Docker-тега, IP-режима, DNS и лимитов;
+- вывод `tg://proxy` / `https://t.me/proxy` ссылки и QR-кода;
+- статус, логи, `mtg doctor`, speedtest;
+- BBR/NAT-диагностика;
+- Add / switch secret;
+- Revoke secret;
+- Regenerate active secret;
+- настройка Nginx disguise и IP allowlist;
+- перезапуск и удаление.
+
+Важно: upstream `mtg` v2 поддерживает один активный secret. Установщик хранит
+список сохраненных secret в `/etc/mtg/secrets.tsv`, но в `config.toml` активным
+становится только один. Это сделано для совместимости с чистым `nineseconds/mtg`.
 
 ## Управление
 
@@ -58,29 +60,46 @@ sudo mtgctl logs
 sudo mtgctl follow
 sudo mtgctl doctor
 sudo mtgctl access
+sudo mtgctl qr
 sudo mtgctl speedtest
+sudo mtgctl bbr-nat
 sudo mtgctl restart
 sudo mtgctl uninstall
 ```
 
-`sudo mtgctl access` выводит `tg://proxy` и `https://t.me/proxy` ссылки.
+`sudo mtgctl access` выводит ссылку и QR-код. Если `qrencode` недоступен в
+репозиториях ОС, ссылка все равно будет показана, а QR можно включить позже:
 
-## Полезные флаги установщика
+```bash
+sudo apt-get install -y qrencode
+sudo mtgctl qr
+```
+
+## Полезные флаги
 
 ```bash
 sudo bash install.sh --domain digitalocean.com --port 443
 sudo bash install.sh --domain hetzner.com --prefer-ip prefer-ipv4 --concurrency 16384
-sudo bash install.sh --domain example.com --tag 2.2.8
+sudo bash install.sh --domain example.com --secret-label family
+sudo bash install.sh --domain example.com --allowlist "203.0.113.10/32,198.51.100.0/24"
+sudo bash install.sh --domain example.com --nginx-disguise --disguise-port 80
+sudo bash install.sh --domain example.com --bbr-nat-check
 sudo bash install.sh --domain example.com --strict-doctor
 sudo bash install.sh --domain example.com --skip-firewall
 sudo bash install.sh --domain example.com --skip-docker-install
 ```
 
-По умолчанию `mtg doctor` не останавливает установку, а показывает предупреждение. Если нужен строгий режим, используйте `--strict-doctor`.
+## Nginx Disguise И Allowlist
+
+Nginx disguise профиль ставит тихую HTTP-страницу на отдельный порт, обычно
+`80/tcp`. Он не занимает порт MTProto-прокси, поэтому не конфликтует с `443/tcp`.
+Для совместного HTTPS/SNI-мультиплексирования нужен отдельный SNI-router или
+HAProxy-профиль, это сознательно не включено в чистый установщик.
+
+IP allowlist включается внутри `mtg` через `[defense.allowlist]` и файл
+`/etc/mtg/allowlist.netset`. Клиенты вне указанных CIDR будут отклоняться.
 
 ## Логи
-
-Основные логи:
 
 ```bash
 sudo journalctl -u mtg.service -n 100 --no-pager
@@ -98,17 +117,19 @@ Docker-логи ограничены ротацией `10m x 5`, чтобы VPS 
 
 ## Firewall
 
-Скрипт открывает TCP-порт в активном `ufw` или `firewalld`.
+Скрипт открывает TCP-порт прокси в активном `ufw` или `firewalld`. Если включен
+Nginx disguise, он также открывает HTTP-порт disguise-профиля.
 
-Если на VPS есть внешний firewall в панели провайдера, откройте там тот же порт, обычно `443/tcp`.
+Если у VPS есть внешний cloud firewall в панели провайдера, откройте там тот же
+порт, обычно `443/tcp`.
 
-Если `ufw`/`firewalld` не активны, скрипт ничего жёстко не меняет. Для временного iptables-правила можно использовать:
+Для временного iptables-правила можно использовать:
 
 ```bash
 sudo bash install.sh --domain digitalocean.com --iptables-fallback
 ```
 
-## Скорость
+## Скорость И Диагностика
 
 `sudo mtgctl speedtest` проверяет:
 
@@ -116,7 +137,16 @@ sudo bash install.sh --domain digitalocean.com --iptables-fallback
 - TCP-доступность нескольких Telegram DC на `443`;
 - базовую HTTPS-скорость исходящего канала VPS через Cloudflare 25 MB.
 
-Это не полноценный тест скорости внутри клиента Telegram, но он быстро показывает плохой маршрут, потери или слабый VPS.
+`sudo mtgctl bbr-nat` показывает:
+
+- текущий TCP congestion control;
+- включен ли BBR;
+- локальный и публичный IPv4/IPv6;
+- возможный NAT/cloud edge;
+- локальные listener-порты.
+
+MTProxy не ускоряет Telegram сам по себе. Он помогает, когда прямой маршрут до
+Telegram блокируется, режется или плохо маршрутизируется.
 
 ## Удаление
 
@@ -132,25 +162,16 @@ sudo mtgctl uninstall
 sudo mtgctl uninstall --purge
 ```
 
-## Публикация на GitHub
-
-```bash
-git init
-git add .
-git commit -m "Initial clean mtg proxy installer"
-gh repo create clean-mtg-proxy --public --source . --remote origin --push
-```
-
-После публикации команда установки уже готова для `s1on-dev/clean-mtg-proxy`.
-
-## Безопасный запуск
+## Безопасный Запуск
 
 Перед запуском на сервере можно скачать и посмотреть скрипт:
 
 ```bash
-curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/main/install.sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.0/install.sh
 less install.sh
-sudo bash install.sh --domain digitalocean.com
+sudo bash install.sh
 ```
 
-Так проще убедиться, что на VPS запускается именно тот код, который вы ожидаете.
+CI проверяет `install.sh` через `bash -n` и ShellCheck.
+
+Архитектура описана в [ARCHITECTURE.md](ARCHITECTURE.md).
