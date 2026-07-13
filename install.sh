@@ -21,6 +21,7 @@ MTG_TAG="${MTG_TAG:-2.2.8}"
 PREFER_IP="${PREFER_IP:-prefer-ipv4}"
 CONCURRENCY="${CONCURRENCY:-8192}"
 DNS_RESOLVER="${DNS_RESOLVER:-https://1.1.1.1}"
+FRONTING_HOST="${FRONTING_HOST:-}"
 ENABLE_BLOCKLIST="${ENABLE_BLOCKLIST:-0}"
 BLOCKLIST_URL="${BLOCKLIST_URL:-https://iplists.firehol.org/files/firehol_abusers_1d.netset}"
 ENABLE_ALLOWLIST="${ENABLE_ALLOWLIST:-0}"
@@ -61,6 +62,8 @@ Options:
   --prefer-ip MODE         prefer-ipv4, prefer-ipv6, only-ipv4, only-ipv6
   --concurrency N          Max client connections, default: 8192
   --dns URL                Resolver for mtg, default: https://1.1.1.1
+  --fronting-host HOST     Optional backend host for rejected/probe traffic.
+                           Use this if the FakeTLS domain resolves back to mtg.
   --enable-blocklist       Enable mtg blocklist profile
   --disable-blocklist      Disable mtg blocklist profile, default
   --blocklist URL          FireHOL-compatible blocklist URL and enable it
@@ -275,6 +278,7 @@ Current settings:
   IP mode:     ${PREFER_IP}
   Concurrency: ${CONCURRENCY}
   DNS:         ${DNS_RESOLVER}
+  Fronting:    ${FRONTING_HOST:-default}
   Blocklist:   ${ENABLE_BLOCKLIST} ${BLOCKLIST_URL}
   Allowlist:   ${ENABLE_ALLOWLIST} ${ALLOWLIST_CIDRS}
   Nginx decoy: ${ENABLE_NGINX_DISGUISE} port=${DISGUISE_HTTP_PORT}
@@ -296,6 +300,7 @@ prompt_install_settings() {
   prompt_prefer_ip
   prompt_value "Max connections" CONCURRENCY "${CONCURRENCY:-8192}"
   prompt_value "DNS resolver" DNS_RESOLVER "${DNS_RESOLVER:-https://1.1.1.1}"
+  prompt_value "Fallback/fronting backend host, empty for default" FRONTING_HOST "${FRONTING_HOST:-}"
   if prompt_yes_no "Enable mtg blocklist profile" "${ENABLE_BLOCKLIST:-0}"; then
     ENABLE_BLOCKLIST=1
     prompt_value "Blocklist URL" BLOCKLIST_URL "${BLOCKLIST_URL:-https://iplists.firehol.org/files/firehol_abusers_1d.netset}"
@@ -678,6 +683,8 @@ parse_args() {
         CONCURRENCY="${2:-}"; shift 2 ;;
       --dns)
         DNS_RESOLVER="${2:-}"; shift 2 ;;
+      --fronting-host)
+        FRONTING_HOST="${2:-}"; shift 2 ;;
       --enable-blocklist)
         ENABLE_BLOCKLIST=1; shift ;;
       --disable-blocklist)
@@ -742,6 +749,8 @@ validate_input() {
   [[ -n "${DOMAIN}" ]] || die "Missing --domain. Use a real domain you control, for example --domain proxy.your-domain.com"
   [[ "${DOMAIN}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Domain contains unsupported characters: ${DOMAIN}"
   [[ "${DOMAIN}" != .* && "${DOMAIN}" != *..* && "${DOMAIN}" == *.* ]] || die "Domain looks invalid: ${DOMAIN}"
+  [[ -z "${FRONTING_HOST}" || "${FRONTING_HOST}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Fronting host contains unsupported characters: ${FRONTING_HOST}"
+  [[ -z "${FRONTING_HOST}" || "${FRONTING_HOST}" == *.* ]] || die "Fronting host looks invalid: ${FRONTING_HOST}"
 
   case "${DOMAIN}" in
     example.com|example.net|example.org)
@@ -969,6 +978,9 @@ fake_tls_domain_preflight() {
 
   if printf '%s\n' "${resolved_ips}" | grep -Fxq "${public4}"; then
     log "FakeTLS domain ${DOMAIN} resolves to this VPS IPv4 (${public4})"
+    if [[ -z "${FRONTING_HOST}" ]]; then
+      warn "No --fronting-host is set. Rejected/probe traffic may loop back to mtg on ${public4}:443 and log fronting timeouts."
+    fi
     if [[ "${PORT}" != "443" ]]; then
       warn "Proxy port is ${PORT}, but FakeTLS fronting checks still use domain-fronting port 443. Keep a real TLS website on TCP/443 or expect doctor fronting warnings."
     fi
@@ -989,7 +1001,7 @@ write_allowlist_file() {
 }
 
 write_config() {
-  local allowlist_enabled allowlist_urls blocklist_enabled
+  local allowlist_enabled allowlist_urls blocklist_enabled fronting_host_line
 
   log "Writing ${CONFIG_FILE}"
   mkdir -p "${CONFIG_DIR}"
@@ -999,8 +1011,12 @@ write_config() {
   allowlist_enabled="false"
   allowlist_urls=""
   blocklist_enabled="false"
+  fronting_host_line=""
   if [[ "${ENABLE_BLOCKLIST}" -eq 1 ]]; then
     blocklist_enabled="true"
+  fi
+  if [[ -n "${FRONTING_HOST}" ]]; then
+    fronting_host_line="host = \"${FRONTING_HOST}\""
   fi
 
   if [[ "${ENABLE_ALLOWLIST}" -eq 1 ]]; then
@@ -1019,6 +1035,7 @@ tolerate-time-skewness = "5s"
 allow-fallback-on-unknown-dc = true
 
 [domain-fronting]
+${fronting_host_line}
 port = 443
 
 [network]
@@ -1080,6 +1097,7 @@ MTG_TAG='${MTG_TAG}'
 PREFER_IP='${PREFER_IP}'
 CONCURRENCY='${CONCURRENCY}'
 DNS_RESOLVER='${DNS_RESOLVER}'
+FRONTING_HOST='${FRONTING_HOST}'
 ENABLE_BLOCKLIST='${ENABLE_BLOCKLIST}'
 BLOCKLIST_URL='${BLOCKLIST_URL}'
 ENABLE_ALLOWLIST='${ENABLE_ALLOWLIST}'
@@ -1248,6 +1266,21 @@ fallback_access_link() {
   printf 'tg://proxy?server=%s&port=%s&secret=%s\n' "${server}" "${PORT}" "${secret}"
 }
 
+hex_access_link_from() {
+  local server
+  server="$(detect_public_server)"
+
+  [[ -n "${server}" && -n "${PORT:-}" ]] || return 1
+  awk -F'"' -v server="${server}" -v port="${PORT}" '
+    /"hex"[[:space:]]*:/ { secret = $4 }
+    END {
+      if (secret != "") {
+        printf "tg://proxy?server=%s&port=%s&secret=%s\n", server, port, secret
+      }
+    }
+  '
+}
+
 public_access_link_from() {
   local link server safe_server safe_port
 
@@ -1289,8 +1322,12 @@ access_info() {
     printf '%s\n' "${output}"
   fi
 
-  official_link="$(printf '%s\n' "${output}" | official_access_link || true)"
-  if [[ -n "${official_link}" ]]; then
+  link="$(printf '%s\n' "${output}" | hex_access_link_from || true)"
+
+  if [[ -z "${link:-}" ]]; then
+    official_link="$(printf '%s\n' "${output}" | official_access_link || true)"
+  fi
+  if [[ -z "${link:-}" && -n "${official_link:-}" ]]; then
     link="$(public_access_link_from "${official_link}" || true)"
   fi
 
