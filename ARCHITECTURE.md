@@ -69,13 +69,14 @@ Docker дает переносимость между VPS-образами и н
 
 ## Безопасность И Устойчивость
 
-- FakeTLS secret генерируется через `mtg generate-secret --hex`.
+- FakeTLS secret генерируется через `mtg generate-secret` в base64-формате.
+- Перед установкой скрипт проверяет, куда резолвится FakeTLS-домен, и предупреждает, если DNS не совпадает с публичным IPv4 VPS.
 - `anti-replay` включен.
-- Blocklist включен через `firehol_abusers_1d`, чтобы не использовать слишком агрессивный `firehol_level1`.
+- Blocklist выключен по умолчанию и включается только явно через меню, `--enable-blocklist` или `--blocklist URL`.
 - Optional allowlist включается через native `[defense.allowlist]`.
 - Конфиг и secret-store хранятся с правами `0600`.
 - Docker-логи ограничены ротацией `10m x 5`.
-- `mtg doctor` запускается во время установки и доступен после нее.
+- `mtg doctor` запускается после старта systemd-сервиса и доступен после установки.
 - QR-код генерируется локально через `qrencode`, без отправки ссылки третьим сервисам.
 
 ## Nginx Disguise

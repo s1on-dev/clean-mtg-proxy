@@ -30,8 +30,10 @@ curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.0/ins
   | sudo bash -s -- --domain digitalocean.com --port 443
 ```
 
-`--domain` нужен для FakeTLS-secret. Лучше выбирать домен осмысленно: например,
-домен провайдера VPS или CDN/сервиса, который выглядит логично для маршрута.
+`--domain` нужен для FakeTLS-secret. Самый надежный вариант - домен, которым вы
+управляете, с A-записью на публичный IPv4 VPS и реальным HTTPS-сайтом на `443`.
+Случайный CDN/сайт может работать хуже: `mtg doctor` покажет SNI-DNS mismatch,
+если домен резолвится не в IP вашего VPS.
 
 ## Меню
 
@@ -39,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.0/ins
 
 - установка или обновление прокси;
 - изменение домена, порта, Docker-тега, IP-режима, DNS и лимитов;
-- вывод `tg://proxy` / `https://t.me/proxy` ссылки и QR-кода;
+- вывод `tg://proxy` ссылки и QR-кода;
 - статус, логи, `mtg doctor`, speedtest;
 - BBR/NAT-диагностика;
 - Add / switch secret;
@@ -67,8 +69,9 @@ sudo mtgctl restart
 sudo mtgctl uninstall
 ```
 
-`sudo mtgctl access` выводит ссылку и QR-код. Если `qrencode` недоступен в
-репозиториях ОС, ссылка все равно будет показана, а QR можно включить позже:
+`sudo mtgctl access` выводит только ссылку. `sudo mtgctl qr` выводит ссылку и
+локальный QR-код. Если `qrencode` недоступен в репозиториях ОС, ссылка все равно
+будет показана, а QR можно включить позже:
 
 ```bash
 sudo apt-get install -y qrencode
@@ -84,6 +87,8 @@ sudo bash install.sh --domain example.com --secret-label family
 sudo bash install.sh --domain example.com --allowlist "203.0.113.10/32,198.51.100.0/24"
 sudo bash install.sh --domain example.com --nginx-disguise --disguise-port 80
 sudo bash install.sh --domain example.com --bbr-nat-check
+sudo bash install.sh --domain example.com --enable-blocklist
+sudo bash install.sh --domain example.com --blocklist https://iplists.firehol.org/files/firehol_abusers_1d.netset
 sudo bash install.sh --domain example.com --strict-doctor
 sudo bash install.sh --domain example.com --skip-firewall
 sudo bash install.sh --domain example.com --skip-docker-install
@@ -129,6 +134,17 @@ Nginx disguise, он также открывает HTTP-порт disguise-про
 sudo bash install.sh --domain digitalocean.com --iptables-fallback
 ```
 
+## Blocklist
+
+Blocklist по умолчанию выключен. Его можно включить через меню или флаг
+`--enable-blocklist`. Флаг `--blocklist URL` задает FireHOL-compatible список и
+тоже включает blocklist.
+
+Если клиентский IP попадает в blocklist, `mtg` отправляет подключение в
+domain-fronting fallback. Это может выглядеть как "подключено, но сообщения не
+отправляются", поэтому для личного прокси безопаснее начинать с выключенного
+blocklist и включать его только осознанно.
+
 ## Скорость И Диагностика
 
 `sudo mtgctl speedtest` проверяет:
@@ -172,6 +188,6 @@ less install.sh
 sudo bash install.sh
 ```
 
-CI проверяет `install.sh` через `bash -n` и ShellCheck.
+CI проверяет `install.sh`, встроенный `mtgctl` helper и ShellCheck.
 
 Архитектура описана в [ARCHITECTURE.md](ARCHITECTURE.md).

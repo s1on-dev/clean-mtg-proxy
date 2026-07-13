@@ -18,6 +18,16 @@ jobs:
       - name: Bash syntax
         run: bash -n install.sh
 
+      - name: Embedded mtgctl syntax
+        run: |
+          awk '
+            /cat > "\$\{CONTROL_BIN\}" <<'\''EOF'\''/ { capture = 1; next }
+            capture && /^EOF$/ { capture = 0; found = 1; exit }
+            capture { print }
+            END { if (!found) exit 1 }
+          ' install.sh > /tmp/mtgctl
+          bash -n /tmp/mtgctl
+
       - name: Install ShellCheck
         run: |
           sudo apt-get update

@@ -21,6 +21,7 @@ MTG_TAG="${MTG_TAG:-2.2.8}"
 PREFER_IP="${PREFER_IP:-prefer-ipv4}"
 CONCURRENCY="${CONCURRENCY:-8192}"
 DNS_RESOLVER="${DNS_RESOLVER:-https://1.1.1.1}"
+ENABLE_BLOCKLIST="${ENABLE_BLOCKLIST:-0}"
 BLOCKLIST_URL="${BLOCKLIST_URL:-https://iplists.firehol.org/files/firehol_abusers_1d.netset}"
 ENABLE_ALLOWLIST="${ENABLE_ALLOWLIST:-0}"
 ALLOWLIST_CIDRS="${ALLOWLIST_CIDRS:-}"
@@ -60,7 +61,9 @@ Options:
   --prefer-ip MODE         prefer-ipv4, prefer-ipv6, only-ipv4, only-ipv6
   --concurrency N          Max client connections, default: 8192
   --dns URL                Resolver for mtg, default: https://1.1.1.1
-  --blocklist URL          FireHOL-compatible blocklist URL
+  --enable-blocklist       Enable mtg blocklist profile
+  --disable-blocklist      Disable mtg blocklist profile, default
+  --blocklist URL          FireHOL-compatible blocklist URL and enable it
   --allowlist CIDRS        Enable mtg allowlist. CIDRs may be comma or space separated.
   --nginx-disguise         Install a quiet Nginx HTTP decoy site
   --disguise-server-name N Server name for Nginx decoy, default: _
@@ -271,7 +274,7 @@ Current settings:
   IP mode:     ${PREFER_IP}
   Concurrency: ${CONCURRENCY}
   DNS:         ${DNS_RESOLVER}
-  Blocklist:   ${BLOCKLIST_URL}
+  Blocklist:   ${ENABLE_BLOCKLIST} ${BLOCKLIST_URL}
   Allowlist:   ${ENABLE_ALLOWLIST} ${ALLOWLIST_CIDRS}
   Nginx decoy: ${ENABLE_NGINX_DISGUISE} port=${DISGUISE_HTTP_PORT}
 EOF
@@ -292,7 +295,12 @@ prompt_install_settings() {
   prompt_prefer_ip
   prompt_value "Max connections" CONCURRENCY "${CONCURRENCY:-8192}"
   prompt_value "DNS resolver" DNS_RESOLVER "${DNS_RESOLVER:-https://1.1.1.1}"
-  prompt_value "Blocklist URL" BLOCKLIST_URL "${BLOCKLIST_URL:-https://iplists.firehol.org/files/firehol_abusers_1d.netset}"
+  if prompt_yes_no "Enable mtg blocklist profile" "${ENABLE_BLOCKLIST:-0}"; then
+    ENABLE_BLOCKLIST=1
+    prompt_value "Blocklist URL" BLOCKLIST_URL "${BLOCKLIST_URL:-https://iplists.firehol.org/files/firehol_abusers_1d.netset}"
+  else
+    ENABLE_BLOCKLIST=0
+  fi
   prompt_value "Active secret label" ACTIVE_SECRET_LABEL "${ACTIVE_SECRET_LABEL:-default}"
 
   if prompt_yes_no "Enable mtg IP allowlist profile" "${ENABLE_ALLOWLIST:-0}"; then
@@ -361,7 +369,7 @@ installer_uninstall() {
 
 menu_access() {
   if [[ -x "${CONTROL_BIN}" ]]; then
-    "${CONTROL_BIN}" access || true
+    "${CONTROL_BIN}" qr || true
   elif cmd_exists docker && [[ -f "${CONFIG_FILE}" ]]; then
     load_state
     docker run --rm -v "${CONFIG_FILE}:/config.toml:ro" "nineseconds/mtg:${MTG_TAG}" access /config.toml || true
@@ -407,6 +415,7 @@ reload_proxy_config() {
   [[ -n "${SECRET}" ]] || die "No active secret found. Install the proxy first."
 
   validate_input
+  fake_tls_domain_preflight
   write_config
   write_systemd_unit
   write_control_script
@@ -571,7 +580,7 @@ Clean MTG Proxy Installer
 
 1) Install / update proxy
 2) Change settings and reinstall
-3) Show proxy link
+3) Show proxy link + QR
 4) Show status
 5) Show logs
 6) Run mtg doctor + speedtest
@@ -668,8 +677,12 @@ parse_args() {
         CONCURRENCY="${2:-}"; shift 2 ;;
       --dns)
         DNS_RESOLVER="${2:-}"; shift 2 ;;
+      --enable-blocklist)
+        ENABLE_BLOCKLIST=1; shift ;;
+      --disable-blocklist)
+        ENABLE_BLOCKLIST=0; shift ;;
       --blocklist)
-        BLOCKLIST_URL="${2:-}"; shift 2 ;;
+        ENABLE_BLOCKLIST=1; BLOCKLIST_URL="${2:-}"; shift 2 ;;
       --allowlist)
         ENABLE_ALLOWLIST=1; ALLOWLIST_CIDRS="${2:-}"; shift 2 ;;
       --nginx-disguise)
@@ -752,6 +765,13 @@ validate_input() {
     prefer-ipv4|prefer-ipv6|only-ipv4|only-ipv6) ;;
     *) die "Unsupported --prefer-ip value: ${PREFER_IP}" ;;
   esac
+
+  case "${ENABLE_BLOCKLIST}" in
+    0|1) ;;
+    *) die "ENABLE_BLOCKLIST must be 0 or 1" ;;
+  esac
+
+  [[ "${ENABLE_BLOCKLIST}" -eq 0 || -n "${BLOCKLIST_URL}" ]] || die "Blocklist URL is required when blocklist is enabled"
 
   if [[ "${ENABLE_ALLOWLIST}" -eq 1 ]]; then
     [[ -n "$(normalize_allowlist_cidrs)" ]] || die "--allowlist requires at least one CIDR"
@@ -862,7 +882,7 @@ generate_secret_for_domain() {
   secret_domain="$1"
 
   docker pull "nineseconds/mtg:${MTG_TAG}" >/dev/null
-  generated_secret="$(docker run --rm "nineseconds/mtg:${MTG_TAG}" generate-secret --hex "${secret_domain}" | tr -d '\r\n ')"
+  generated_secret="$(docker run --rm "nineseconds/mtg:${MTG_TAG}" generate-secret "${secret_domain}" | tr -d '\r\n ')"
   [[ -n "${generated_secret}" ]] || die "Could not generate secret"
   printf '%s\n' "${generated_secret}"
 }
@@ -878,6 +898,76 @@ generate_secret() {
   [[ -n "${SECRET}" ]] || die "Could not generate secret"
 }
 
+detect_public_ipv4() {
+  local ip
+
+  if cmd_exists curl; then
+    ip="$(curl -4 -fsS --max-time 5 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
+    if [[ -n "${ip}" ]]; then
+      printf '%s\n' "${ip}"
+      return 0
+    fi
+
+    ip="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null | tr -d '\r\n ' || true)"
+    if [[ -n "${ip}" ]]; then
+      printf '%s\n' "${ip}"
+      return 0
+    fi
+  fi
+
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }' || true)"
+  [[ -n "${ip}" ]] && printf '%s\n' "${ip}"
+}
+
+resolve_domain_ipv4s() {
+  local domain
+  domain="$1"
+
+  if cmd_exists dig; then
+    dig @1.1.1.1 +short A "${domain}" 2>/dev/null | awk '/^[0-9.]+$/ { print }' | sort -u
+    return 0
+  fi
+
+  if cmd_exists host; then
+    host -t A "${domain}" 1.1.1.1 2>/dev/null | awk '/has address/ { print $4 }' | sort -u
+    return 0
+  fi
+
+  if cmd_exists getent; then
+    getent ahostsv4 "${domain}" 2>/dev/null | awk '{ print $1 }' | sort -u
+  fi
+}
+
+fake_tls_domain_preflight() {
+  local public4 resolved_ips resolved_line
+
+  [[ -n "${DOMAIN:-}" ]] || return
+
+  log "Checking FakeTLS domain DNS"
+  public4="$(detect_public_ipv4 || true)"
+  resolved_ips="$(resolve_domain_ipv4s "${DOMAIN}" || true)"
+  resolved_line="$(printf '%s\n' "${resolved_ips}" | awk 'BEGIN { sep = "" } NF { printf "%s%s", sep, $0; sep = ", " } END { print "" }')"
+
+  if [[ -z "${resolved_ips}" ]]; then
+    warn "Could not resolve ${DOMAIN} to IPv4. mtg doctor may fail SNI-DNS validation."
+    return
+  fi
+
+  if [[ -z "${public4}" ]]; then
+    warn "Could not detect this VPS public IPv4. Resolved ${DOMAIN} to: ${resolved_line}"
+    return
+  fi
+
+  if printf '%s\n' "${resolved_ips}" | grep -Fxq "${public4}"; then
+    log "FakeTLS domain ${DOMAIN} resolves to this VPS IPv4 (${public4})"
+    if [[ "${PORT}" != "443" ]]; then
+      warn "Proxy port is ${PORT}, but FakeTLS fronting checks still use domain-fronting port 443. Keep a real TLS website on TCP/443 or expect doctor fronting warnings."
+    fi
+  else
+    warn "FakeTLS domain ${DOMAIN} resolves to [${resolved_line}], not this VPS IPv4 (${public4}). Use a domain you control with an A record to this VPS for best reliability."
+  fi
+}
+
 write_allowlist_file() {
   log "Writing ${ALLOWLIST_FILE}"
   mkdir -p "${CONFIG_DIR}"
@@ -890,7 +980,7 @@ write_allowlist_file() {
 }
 
 write_config() {
-  local allowlist_enabled allowlist_urls
+  local allowlist_enabled allowlist_urls blocklist_enabled
 
   log "Writing ${CONFIG_FILE}"
   mkdir -p "${CONFIG_DIR}"
@@ -899,6 +989,11 @@ write_config() {
 
   allowlist_enabled="false"
   allowlist_urls=""
+  blocklist_enabled="false"
+  if [[ "${ENABLE_BLOCKLIST}" -eq 1 ]]; then
+    blocklist_enabled="true"
+  fi
+
   if [[ "${ENABLE_ALLOWLIST}" -eq 1 ]]; then
     write_allowlist_file
     allowlist_enabled="true"
@@ -912,7 +1007,7 @@ concurrency = ${CONCURRENCY}
 prefer-ip = "${PREFER_IP}"
 auto-update = false
 tolerate-time-skewness = "5s"
-allow-fallback-on-unknown-dc = false
+allow-fallback-on-unknown-dc = true
 
 [domain-fronting]
 port = 443
@@ -938,7 +1033,7 @@ max-size = "2mib"
 error-rate = 0.001
 
 [defense.blocklist]
-enabled = true
+enabled = ${blocklist_enabled}
 download-concurrency = 2
 urls = [
   "${BLOCKLIST_URL}",
@@ -976,6 +1071,7 @@ MTG_TAG='${MTG_TAG}'
 PREFER_IP='${PREFER_IP}'
 CONCURRENCY='${CONCURRENCY}'
 DNS_RESOLVER='${DNS_RESOLVER}'
+ENABLE_BLOCKLIST='${ENABLE_BLOCKLIST}'
 BLOCKLIST_URL='${BLOCKLIST_URL}'
 ENABLE_ALLOWLIST='${ENABLE_ALLOWLIST}'
 ALLOWLIST_CIDRS='${ALLOWLIST_CIDRS}'
@@ -1006,7 +1102,7 @@ Restart=always
 RestartSec=5
 TimeoutStartSec=0
 LimitNOFILE=65536
-ExecStartPre=-${docker_bin} rm -f ${CONTAINER_NAME}
+ExecStartPre=/bin/sh -c '${docker_bin} rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true'
 ExecStartPre=${docker_bin} pull nineseconds/mtg:${MTG_TAG}
 ExecStart=${docker_bin} run --rm --name ${CONTAINER_NAME} \\
   --publish ${PORT}:3128/tcp \\
@@ -1058,6 +1154,7 @@ Usage:
   sudo mtgctl doctor
   sudo mtgctl access
   sudo mtgctl qr
+  sudo mtgctl raw-access
   sudo mtgctl speedtest
   sudo mtgctl bbr-nat
   sudo mtgctl restart
@@ -1069,7 +1166,7 @@ USAGE
 
 need_root_for() {
   case "${1:-}" in
-    logs|follow|status|doctor|access|qr|speedtest|bbr-nat|help|-h|--help) return 0 ;;
+    logs|follow|status|doctor|access|qr|raw-access|speedtest|bbr-nat|help|-h|--help) return 0 ;;
   esac
   if [[ "${EUID}" -ne 0 ]]; then
     echo "Run this command with sudo" >&2
@@ -1139,7 +1236,7 @@ fallback_access_link() {
   server="$(detect_public_server)"
 
   [[ -n "${server}" && -n "${PORT:-}" && -n "${secret}" ]] || return 1
-  printf 'https://t.me/proxy?server=%s&port=%s&secret=%s\n' "${server}" "${PORT}" "${secret}"
+  printf 'tg://proxy?server=%s&port=%s&secret=%s\n' "${server}" "${PORT}" "${secret}"
 }
 
 public_access_link_from() {
@@ -1157,19 +1254,31 @@ public_access_link_from() {
 
 official_access_link() {
   awk -F'"' '
-    /"tme_url"[[:space:]]*:/ { print $4; exit }
     /"tg_url"[[:space:]]*:/ { print $4; exit }
+    /"tme_url"[[:space:]]*:/ { print $4; exit }
   '
 }
 
 access_info() {
-  local output link official_link
+  local output link official_link print_raw show_qr arg
+  print_raw=0
+  show_qr=1
+
+  for arg in "$@"; do
+    case "${arg}" in
+      --no-qr) show_qr=0 ;;
+      --raw) print_raw=1 ;;
+    esac
+  done
+
   output="$(
     docker exec "${CONTAINER_NAME}" /mtg access /config.toml 2>/dev/null \
       || docker run --rm -v "${CONFIG_FILE}:/config.toml:ro" "nineseconds/mtg:${MTG_TAG}" access /config.toml 2>/dev/null \
       || true
   )"
-  [[ -n "${output}" ]] && printf '%s\n' "${output}"
+  if [[ "${print_raw}" -eq 1 && -n "${output}" ]]; then
+    printf '%s\n' "${output}"
+  fi
 
   official_link="$(printf '%s\n' "${output}" | official_access_link || true)"
   if [[ -n "${official_link}" ]]; then
@@ -1188,7 +1297,7 @@ access_info() {
     link="$(printf '%s\n' "${output}" | awk 'match($0, /(https:\/\/t\.me\/proxy[^[:space:]",]+|tg:\/\/proxy[^[:space:]",]+)/) { print substr($0, RSTART, RLENGTH); exit }')"
   fi
 
-  [[ "${1:-}" == "--no-qr" ]] || print_qr "${link}"
+  [[ "${show_qr}" -eq 0 ]] || print_qr "${link}"
 }
 
 print_qr() {
@@ -1328,10 +1437,13 @@ case "${cmd}" in
     doctor
     ;;
   access)
-    access_info
+    access_info --no-qr
     ;;
   qr)
     access_info
+    ;;
+  raw-access)
+    access_info --raw --no-qr
     ;;
   bbr-nat)
     bbr_nat_check
@@ -1632,6 +1744,7 @@ EOF
 install_proxy() {
   install_packages
   ensure_docker
+  fake_tls_domain_preflight
   generate_secret
   store_secret "${ACTIVE_SECRET_LABEL:-default}" "${DOMAIN}" "${SECRET}"
   write_config
@@ -1639,8 +1752,8 @@ install_proxy() {
   write_control_script
   configure_firewall
   configure_nginx_disguise
-  run_doctor
   start_service
+  run_doctor
   show_access
   run_bbr_nat_check
   run_speedtest
