@@ -1081,15 +1081,85 @@ doctor() {
   docker run --rm -v "${CONFIG_FILE}:/config.toml:ro" "nineseconds/mtg:${MTG_TAG}" doctor /config.toml
 }
 
+active_secret() {
+  local secret
+
+  secret="$(awk -F'"' '/^secret[[:space:]]*=/{ print $2; exit }' "${CONFIG_FILE}" 2>/dev/null || true)"
+  if [[ -n "${secret}" ]]; then
+    printf '%s\n' "${secret}"
+    return 0
+  fi
+
+  if [[ -f "${SECRETS_FILE}" ]]; then
+    awk -F'\t' -v label="${ACTIVE_SECRET_LABEL:-default}" 'NF >= 3 && $1 == label { print $3; exit }' "${SECRETS_FILE}" 2>/dev/null || true
+  fi
+}
+
+detect_public_server() {
+  local public4 public6 local4
+
+  if [[ -n "${SERVER_HOST:-}" ]]; then
+    printf '%s\n' "${SERVER_HOST}"
+    return 0
+  fi
+
+  if [[ -n "${PUBLIC_IP:-}" ]]; then
+    printf '%s\n' "${PUBLIC_IP}"
+    return 0
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    public4="$(curl -4 -fsS --max-time 5 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
+    if [[ -n "${public4}" ]]; then
+      printf '%s\n' "${public4}"
+      return 0
+    fi
+
+    public4="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null | tr -d '\r\n ' || true)"
+    if [[ -n "${public4}" ]]; then
+      printf '%s\n' "${public4}"
+      return 0
+    fi
+
+    public6="$(curl -6 -fsS --max-time 5 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
+    if [[ -n "${public6}" ]]; then
+      printf '%s\n' "${public6}"
+      return 0
+    fi
+  fi
+
+  local4="$(hostname -I 2>/dev/null | awk '{ print $1; exit }' || true)"
+  [[ -n "${local4}" ]] && printf '%s\n' "${local4}"
+}
+
+fallback_access_link() {
+  local server secret
+
+  secret="$(active_secret)"
+  server="$(detect_public_server)"
+
+  [[ -n "${server}" && -n "${PORT:-}" && -n "${secret}" ]] || return 1
+  printf 'https://t.me/proxy?server=%s&port=%s&secret=%s\n' "${server}" "${PORT}" "${secret}"
+}
+
 access_info() {
   local output link
   output="$(
     docker exec "${CONTAINER_NAME}" /mtg access /config.toml 2>/dev/null \
-      || docker run --rm -v "${CONFIG_FILE}:/config.toml:ro" "nineseconds/mtg:${MTG_TAG}" access /config.toml
+      || docker run --rm -v "${CONFIG_FILE}:/config.toml:ro" "nineseconds/mtg:${MTG_TAG}" access /config.toml 2>/dev/null \
+      || true
   )"
-  printf '%s\n' "${output}"
+  [[ -n "${output}" ]] && printf '%s\n' "${output}"
 
-  link="$(printf '%s\n' "${output}" | awk '/^https:\/\/t\.me\/proxy/ { print; exit } /^tg:\/\/proxy/ { print; exit }')"
+  link="$(printf '%s\n' "${output}" | awk 'match($0, /(https:\/\/t\.me\/proxy[^[:space:]]+|tg:\/\/proxy[^[:space:]]+)/) { print substr($0, RSTART, RLENGTH); exit }')"
+  if [[ -z "${link}" ]]; then
+    link="$(fallback_access_link || true)"
+    if [[ -n "${link}" ]]; then
+      echo "Fallback access link:"
+      printf '%s\n' "${link}"
+    fi
+  fi
+
   [[ "${1:-}" == "--no-qr" ]] || print_qr "${link}"
 }
 
