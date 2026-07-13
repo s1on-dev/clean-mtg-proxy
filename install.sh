@@ -715,7 +715,7 @@ require_root() {
 }
 
 normalize_allowlist_cidrs() {
-  printf '%s\n' "${ALLOWLIST_CIDRS}" | tr ',;' '\n\n' | tr ' ' '\n' | awk 'NF { print }'
+  printf '%s\n' "${ALLOWLIST_CIDRS}" | tr ',; ' '\n' | awk 'NF { print }'
 }
 
 validate_input() {
