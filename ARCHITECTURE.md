@@ -3,103 +3,106 @@
 ```text
 Telegram client
   |
-  | tg://proxy or https://t.me/proxy link
+  | Secure MTProto, secret prefix dd
   v
-VPS firewall: TCP/443 or selected port
+VPS/cloud firewall: TCP/443 (или выбранный порт)
   |
   v
-systemd: mtg.service
+Docker publish: public PORT -> container TCP/3128
   |
   v
-Docker container: mtg-proxy
+telemt-proxy container
   |
-  | /etc/mtg/config.toml mounted as /config.toml
-  v
-nineseconds/mtg
+  +-- Telegram Middle-End
   |
-  v
-Telegram data centers
+  `-- Direct-DC fallback
+        |
+        v
+      Telegram DC 1-5
 ```
 
-Дополнительный HTTP disguise-профиль, если включен:
-
-```text
-Browser or scanner
-  |
-  | HTTP/80 or selected disguise port
-  v
-Nginx
-  |
-  v
-/var/www/mtg-disguise/index.html
-```
+В этой схеме нет FakeTLS-домена, SNI-DNS проверки, `sslip.io`, Nginx и
+domain-fronting backend. Прокси не пытается подключаться обратно к собственному
+публичному порту.
 
 ## Компоненты
 
-- `install.sh` ставит и настраивает сервис.
-- `/etc/mtg/config.toml` хранит активный secret, bind, network и defense-настройки.
-- `/etc/mtg/secrets.tsv` хранит сохраненные secret для ротации.
-- `/etc/mtg/allowlist.netset` хранит CIDR-список разрешенных клиентов, если включен allowlist.
-- `mtg.service` запускает Docker-контейнер в foreground-режиме.
-- `mtgctl` дает короткие команды для статуса, логов, doctor, ссылки, QR, speedtest и BBR/NAT.
-- `.github/workflows/ci.yml` проверяет `install.sh` через `bash -n` и ShellCheck.
+- `install.sh` устанавливает зависимости, Docker, конфигурацию и systemd unit.
+- `telemt-proxy.service` запускает контейнер в foreground и отвечает за автозапуск.
+- `ghcr.io/telemt/telemt:3.4.23` обрабатывает MTProto-трафик.
+- `/etc/clean-mtg-proxy/config.toml` содержит Secure-only конфигурацию.
+- `/etc/clean-mtg-proxy/users.tsv` хранит несколько активных секретов.
+- `mtgctl` управляет сервисом, ссылками, ключами и диагностикой.
 
-## Почему Docker + systemd
+## Режим транспорта
 
-Docker дает переносимость между VPS-образами и не требует скачивать отдельный
-бинарник под архитектуру. Systemd отвечает за автозапуск, перезапуск и единый
-интерфейс логов.
+Конфигурация явно задаёт:
 
-Контейнер слушает внутренний порт `3128`, наружу публикуется выбранный порт,
-обычно `443/tcp`.
+```toml
+[general]
+use_middle_proxy = true
+me2dc_fallback = true
+me2dc_fast = true
 
-## Secret-Модель
+[general.modes]
+classic = false
+secure = true
+tls = false
+```
 
-`nineseconds/mtg` v2 поддерживает один активный secret. Поэтому установщик не
-делает несколько одновременно активных ключей. Вместо этого он хранит список
-сохраненных secret и быстро переключает активный:
+Новые соединения используют Telegram Middle-End. Если он ещё не готов или
+временно недоступен, Telemt может открыть Direct-DC маршрут. Это предотвращает
+состояние, при котором TCP-соединение с VPS есть, а рабочей дороги до Telegram
+нет.
 
-1. выбранный secret пишется в `/etc/mtg/config.toml`;
-2. systemd unit и helper обновляются;
-3. `mtg.service` перезапускается;
-4. новая ссылка и QR-код выводятся через `mtgctl access`.
+## Проверка готовности
 
-Такой подход сохраняет совместимость с upstream `mtg` и дает нормальную ротацию
-доступа без смены backend.
+Контейнер предоставляет локальный Control API на `127.0.0.1:9091`. Он не
+публикуется на хост и недоступен из интернета.
 
-## Безопасность И Устойчивость
+Установщик выполняет две проверки:
 
-- FakeTLS secret генерируется через `mtg generate-secret` в base64-формате.
-- Перед установкой скрипт проверяет, куда резолвится FakeTLS-домен, и предупреждает, если DNS не совпадает с публичным IPv4 VPS.
-- `anti-replay` включен.
-- Blocklist выключен по умолчанию и включается только явно через меню, `--enable-blocklist` или `--blocklist URL`.
-- Optional allowlist включается через native `[defense.allowlist]`.
-- Конфиг и secret-store хранятся с правами `0600`.
-- Docker-логи ограничены ротацией `10m x 5`.
-- `mtg doctor` запускается после старта systemd-сервиса и доступен после установки.
-- QR-код генерируется локально через `qrencode`, без отправки ссылки третьим сервисам.
+```text
+healthcheck liveness -> процесс и Control API работают
+healthcheck ready    -> upstream-маршрут готов принимать клиентский трафик
+```
 
-## Nginx Disguise
+После этого `mtgctl doctor` проверяет listener и TCP-доступность Telegram DC.
+При ошибке установка по умолчанию завершается ненулевым кодом и не сообщает
+ложный успех.
 
-Disguise-профиль ставит простую HTTP-страницу на отдельный порт, обычно `80`.
-Он нужен как тихий decoy для обычного HTTP-сканирования IP.
+## Systemd и Docker
 
-Он не подменяет SNI-router и не делит один HTTPS-порт с MTProto. Если нужен
-полноценный HTTPS/SNI-мультиплексор, лучше добавлять отдельный HAProxy/SNI-router
-профиль, чтобы не усложнять чистый базовый установщик.
+Образ загружается во время установки или команды `mtgctl update`. Обычный
+рестарт сервиса не выполняет `docker pull`, поэтому временная недоступность
+registry не мешает перезапустить уже установленный прокси.
 
-## Скорость
+Контейнер запускается со следующими ограничениями:
 
-MTProxy не ускоряет Telegram сам по себе. На скорость сильнее всего влияют:
+- read-only root filesystem;
+- непривилегированный пользователь контейнера `65532:65532`;
+- сброшены все Linux capabilities;
+- `no-new-privileges`;
+- ограниченная tmpfs;
+- `nofile` до 262144;
+- Docker log rotation `10m x 5`.
 
-- география VPS относительно пользователей;
-- качество сети провайдера;
-- packet loss и jitter;
-- доступность Telegram DC с VPS;
-- внешний cloud firewall;
-- DPI-ограничения;
-- TCP congestion control и NAT/cloud edge.
+## Секреты
 
-`mtgctl speedtest` быстро проверяет Telegram DC и исходящую HTTPS-скорость VPS.
-`mtgctl bbr-nat` показывает BBR/NAT-состояние и подсказывает команды для
-включения BBR, но не меняет kernel-параметры автоматически.
+Каждая строка `users.tsv` содержит label, 32-hex secret и дату создания. Все
+ключи одновременно записываются в `[access.users]`.
+
+Клиентская ссылка всегда формируется как:
+
+```text
+tg://proxy?server=HOST&port=PORT&secret=dd<32-hex-secret>
+```
+
+Префикс `dd` включается только на стороне клиента. В конфигурации Telemt хранится
+исходный 32-hex secret без префикса.
+
+## Миграция
+
+Перед установкой скрипт отключает `mtg.service` и удаляет контейнер `mtg-proxy`,
+чтобы освободить порт. Старый `/etc/mtg` не удаляется. Новая конфигурация живёт
+в отдельном каталоге, поэтому её можно удалить без повреждения резервной копии.

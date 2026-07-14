@@ -16,16 +16,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Bash syntax
-        run: bash -n install.sh
-
-      - name: Embedded mtgctl syntax
         run: |
-          awk '
-            /cat > "\$\{CONTROL_BIN\}" <<'\''EOF'\''/ { capture = 1; next }
-            capture && /^EOF$/ { capture = 0; found = 1; exit }
-            capture { print }
-            END { if (!found) exit 1 }
-          ' install.sh > /tmp/mtgctl
+          bash -n install.sh
+          bash -n tests/extract_mtgctl.sh
+          bash -n tests/test_install.sh
+
+      - name: Embedded mtgctl syntax and ShellCheck
+        run: |
+          bash tests/extract_mtgctl.sh > /tmp/mtgctl
           bash -n /tmp/mtgctl
 
       - name: Install ShellCheck
@@ -34,4 +32,9 @@ jobs:
           sudo apt-get install -y shellcheck
 
       - name: ShellCheck
-        run: shellcheck install.sh
+        run: |
+          shellcheck install.sh tests/extract_mtgctl.sh tests/test_install.sh
+          shellcheck /tmp/mtgctl
+
+      - name: Installer regression tests
+        run: bash tests/test_install.sh

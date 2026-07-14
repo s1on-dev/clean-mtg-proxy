@@ -1,95 +1,75 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SERVICE_NAME="mtg.service"
-CONTAINER_NAME="mtg-proxy"
-CONFIG_DIR="/etc/mtg"
+SERVICE_NAME="telemt-proxy.service"
+LEGACY_SERVICE_NAME="mtg.service"
+CONTAINER_NAME="telemt-proxy"
+LEGACY_CONTAINER_NAME="mtg-proxy"
+ALTERNATE_CONTAINER_NAME="mtprotoproxy"
+CONFIG_DIR="/etc/clean-mtg-proxy"
 CONFIG_FILE="${CONFIG_DIR}/config.toml"
 STATE_FILE="${CONFIG_DIR}/install.env"
-SECRETS_FILE="${CONFIG_DIR}/secrets.tsv"
-ALLOWLIST_FILE="${CONFIG_DIR}/allowlist.netset"
+USERS_FILE="${CONFIG_DIR}/users.tsv"
 SYSTEMD_FILE="/etc/systemd/system/${SERVICE_NAME}"
 CONTROL_BIN="/usr/local/bin/mtgctl"
-NGINX_SITE_FILE="/etc/nginx/conf.d/mtg-disguise.conf"
-NGINX_WEB_ROOT="/var/www/mtg-disguise"
 
-DOMAIN="${DOMAIN:-}"
 PORT="${PORT:-443}"
+PUBLIC_HOST="${PUBLIC_HOST:-}"
 SECRET="${SECRET:-}"
-ACTIVE_SECRET_LABEL="${ACTIVE_SECRET_LABEL:-default}"
-MTG_TAG="${MTG_TAG:-2.2.8}"
-PREFER_IP="${PREFER_IP:-prefer-ipv4}"
-CONCURRENCY="${CONCURRENCY:-8192}"
-DNS_RESOLVER="${DNS_RESOLVER:-https://1.1.1.1}"
-FRONTING_HOST="${FRONTING_HOST:-}"
-ENABLE_BLOCKLIST="${ENABLE_BLOCKLIST:-0}"
-BLOCKLIST_URL="${BLOCKLIST_URL:-https://iplists.firehol.org/files/firehol_abusers_1d.netset}"
-ENABLE_ALLOWLIST="${ENABLE_ALLOWLIST:-0}"
-ALLOWLIST_CIDRS="${ALLOWLIST_CIDRS:-}"
-ENABLE_NGINX_DISGUISE="${ENABLE_NGINX_DISGUISE:-0}"
-DISGUISE_SERVER_NAME="${DISGUISE_SERVER_NAME:-_}"
-DISGUISE_HTTP_PORT="${DISGUISE_HTTP_PORT:-80}"
+SECRET_LABEL="${SECRET_LABEL:-default}"
+TELEMT_TAG="${TELEMT_TAG:-3.4.23}"
+TELEMT_IMAGE="${TELEMT_IMAGE:-ghcr.io/telemt/telemt:${TELEMT_TAG}}"
+PREFER_IPV6="${PREFER_IPV6:-0}"
+USE_MIDDLE_PROXY="${USE_MIDDLE_PROXY:-1}"
+ME2DC_FAST="${ME2DC_FAST:-1}"
 
 INSTALL_DOCKER=1
 ALLOW_DOCKER_SCRIPT=1
 CONFIGURE_FIREWALL=1
 IPTABLES_FALLBACK=0
 RUN_DOCTOR=1
-STRICT_DOCTOR=0
-RUN_SPEEDTEST=1
+STRICT_DOCTOR=1
+RUN_SPEEDTEST=0
 RUN_BBR_NAT_CHECK=0
 START_SERVICE=1
 BASE_PACKAGES_READY=0
+LEGACY_OPTIONS_USED=0
 
 usage() {
   cat <<'EOF'
-Clean mtg MTProto proxy installer.
+Clean MTProto proxy installer (Telemt secure mode).
 
 Usage:
   sudo bash install.sh
-  sudo bash install.sh --domain your-real-domain.com [options]
-
-Required:
-  --domain DOMAIN          FakeTLS/domain-fronting hostname used to generate secret.
-                           Choose a domain thoughtfully. For non-interactive
-                           installs this option is required.
+  sudo bash install.sh --port 443 [options]
 
 Options:
   --port PORT              Public TCP port, default: 443
-  --secret SECRET          Existing mtg secret. If omitted, it is generated.
-  --secret-label LABEL     Label for the active saved secret, default: default
-  --tag TAG                Docker image tag for nineseconds/mtg, default: 2.2.8
-  --prefer-ip MODE         prefer-ipv4, prefer-ipv6, only-ipv4, only-ipv6
-  --concurrency N          Max client connections, default: 8192
-  --dns URL                Resolver for mtg, default: https://1.1.1.1
-  --fronting-host HOST     Optional backend host for rejected/probe traffic.
-                           Use this if the FakeTLS domain resolves back to mtg.
-  --enable-blocklist       Enable mtg blocklist profile
-  --disable-blocklist      Disable mtg blocklist profile, default
-  --blocklist URL          FireHOL-compatible blocklist URL and enable it
-  --allowlist CIDRS        Enable mtg allowlist. CIDRs may be comma or space separated.
-  --nginx-disguise         Install a quiet Nginx HTTP decoy site
-  --disable-nginx-disguise Disable Nginx HTTP decoy site
-  --disguise-server-name N Server name for Nginx decoy, default: DOMAIN
-  --disguise-port PORT     HTTP port for Nginx decoy, default: 80
-  --bbr-nat-check          Run optional BBR/NAT diagnostics after install
-  --skip-docker-install    Require Docker to be already installed
-  --no-docker-script       Do not fallback to https://get.docker.com
-  --skip-firewall          Do not open firewall port
-  --iptables-fallback      If ufw/firewalld are absent, add a non-persistent
-                           iptables ACCEPT rule for the proxy port
-  --skip-doctor            Do not run mtg doctor during installation
-  --strict-doctor          Fail installation if mtg doctor reports problems
-  --skip-speedtest         Do not run basic connectivity/speed test
-  --no-start               Write files but do not start the service
-  -h, --help               Show help
+  --server HOST            Public IPv4 or DNS name used in Telegram links
+  --secret SECRET          32 hexadecimal characters
+  --secret-label LABEL     Secret label, default: default
+  --tag TAG                Telemt container tag, default: 3.4.23
+  --image IMAGE            Full container image override
+  --prefer-ipv6            Prefer IPv6 for Telegram upstream connections
+  --direct                 Disable Telegram Middle-End and use Direct-DC
+  --middle-proxy           Use Telegram Middle-End with Direct-DC fallback, default
+  --bbr-nat-check          Run optional BBR/NAT diagnostics
+  --skip-docker-install    Require Docker to be installed already
+  --no-docker-script       Do not fall back to https://get.docker.com
+  --skip-firewall          Do not change the local firewall
+  --iptables-fallback      Add a non-persistent INPUT accept rule if needed
+  --skip-doctor            Skip readiness diagnostics
+  --no-strict-doctor       Do not fail installation when readiness is not reached
+  --speedtest              Run download and Telegram TCP checks after install
+  --no-start               Write configuration without starting the service
+  -h, --help               Show this help
 
-Examples:
-  sudo bash install.sh
-  sudo bash install.sh --domain proxy.your-domain.com
-  sudo DOMAIN=proxy.your-domain.com bash install.sh
-  curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/main/install.sh \
-    | sudo bash -s -- --domain proxy.your-domain.com --port 443
+Compatibility:
+  Old FakeTLS options such as --domain and --disable-nginx-disguise are
+  accepted and ignored. Telemt secure mode does not use a domain or Nginx.
+
+Non-interactive example:
+  sudo bash install.sh --port 443 --server 203.0.113.10
 EOF
 }
 
@@ -114,593 +94,78 @@ pause() {
   read -r -p "Press Enter to continue..." _
 }
 
+require_root() {
+  [[ "${EUID}" -eq 0 ]] || die "Run as root: sudo bash install.sh"
+  cmd_exists systemctl || die "systemd is required"
+}
+
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 load_state() {
   if [[ -f "${STATE_FILE}" ]]; then
     # shellcheck disable=SC1090
-    source "${STATE_FILE}" || true
+    source "${STATE_FILE}"
   fi
+  TELEMT_IMAGE="${TELEMT_IMAGE:-ghcr.io/telemt/telemt:${TELEMT_TAG}}"
 }
 
-current_secret() {
-  [[ -f "${CONFIG_FILE}" ]] || return 0
-  awk -F'"' '/^secret[[:space:]]*=/{print $2; exit}' "${CONFIG_FILE}" 2>/dev/null || true
+validate_label() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]] \
+    || die "Secret label may contain only letters, numbers, underscore and dash"
 }
 
-prompt_yes_no() {
-  local label default_value answer
-  label="$1"
-  default_value="$2"
-
-  if [[ "${default_value}" == "1" ]]; then
-    read -r -p "${label} [Y/n]: " answer
-    case "${answer}" in
-      n|N|no|NO|No) return 1 ;;
-      *) return 0 ;;
-    esac
-  fi
-
-  read -r -p "${label} [y/N]: " answer
-  case "${answer}" in
-    y|Y|yes|YES|Yes) return 0 ;;
-    *) return 1 ;;
-  esac
+validate_secret() {
+  [[ "$1" =~ ^[0-9A-Fa-f]{32}$ ]] || die "Secret must contain exactly 32 hexadecimal characters"
 }
 
-prompt_value() {
-  local label var_name default_value input
-  label="$1"
-  var_name="$2"
-  default_value="$3"
-
-  read -r -p "${label} [${default_value}]: " input
-  printf -v "${var_name}" '%s' "${input:-${default_value}}"
+validate_host() {
+  [[ -n "$1" ]] || die "Public host is empty"
+  [[ "$1" =~ ^[A-Za-z0-9:.-]+$ ]] || die "Public host contains unsupported characters: $1"
 }
 
-prompt_prefer_ip() {
-  local input
-
-  cat <<EOF
-IP mode:
-  1) prefer-ipv4 (recommended for most VPS)
-  2) prefer-ipv6
-  3) only-ipv4
-  4) only-ipv6
-EOF
-  read -r -p "Choose IP mode [${PREFER_IP}]: " input
-
-  case "${input}" in
-    1) PREFER_IP="prefer-ipv4" ;;
-    2) PREFER_IP="prefer-ipv6" ;;
-    3) PREFER_IP="only-ipv4" ;;
-    4) PREFER_IP="only-ipv6" ;;
-    "") ;;
-    prefer-ipv4|prefer-ipv6|only-ipv4|only-ipv6) PREFER_IP="${input}" ;;
-    *) warn "Unknown IP mode, keeping ${PREFER_IP}" ;;
-  esac
-}
-
-validate_secret_label() {
-  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "Secret label may contain only letters, numbers, dot, underscore and dash"
-}
-
-secret_store_init() {
-  local existing_secret now
-
-  mkdir -p "${CONFIG_DIR}"
-  chmod 0755 "${CONFIG_DIR}"
-
-  if [[ ! -f "${SECRETS_FILE}" ]]; then
-    existing_secret="$(current_secret)"
-    if [[ -n "${existing_secret}" ]]; then
-      now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      printf '%s\t%s\t%s\t%s\n' "${ACTIVE_SECRET_LABEL:-default}" "${DOMAIN:-unknown}" "${existing_secret}" "${now}" > "${SECRETS_FILE}"
-    else
-      : > "${SECRETS_FILE}"
-    fi
-  fi
-
-  chmod 0600 "${SECRETS_FILE}"
-}
-
-store_secret() {
-  local label domain secret now tmp
-  label="$1"
-  domain="$2"
-  secret="$3"
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-  validate_secret_label "${label}"
-  [[ -n "${domain}" ]] || die "Secret domain is empty"
-  [[ -n "${secret}" ]] || die "Secret value is empty"
-
-  secret_store_init
-  tmp="$(mktemp)"
-  awk -F'\t' -v label="${label}" 'BEGIN { OFS = FS } $1 != label { print }' "${SECRETS_FILE}" > "${tmp}"
-  printf '%s\t%s\t%s\t%s\n' "${label}" "${domain}" "${secret}" "${now}" >> "${tmp}"
-  mv "${tmp}" "${SECRETS_FILE}"
-  chmod 0600 "${SECRETS_FILE}"
-}
-
-remove_secret() {
-  local label tmp
-  label="$1"
-  secret_store_init
-  tmp="$(mktemp)"
-  awk -F'\t' -v label="${label}" 'BEGIN { OFS = FS } $1 != label { print }' "${SECRETS_FILE}" > "${tmp}"
-  mv "${tmp}" "${SECRETS_FILE}"
-  chmod 0600 "${SECRETS_FILE}"
-}
-
-secret_count() {
-  secret_store_init
-  awk -F'\t' 'NF >= 3 { count++ } END { print count + 0 }' "${SECRETS_FILE}"
-}
-
-print_secret_list() {
-  local active
-  active="${ACTIVE_SECRET_LABEL:-default}"
-  secret_store_init
-  awk -F'\t' -v active="${active}" 'NF >= 3 {
-    marker = ($1 == active) ? "*" : " ";
-    printf "%s %d) %s  domain=%s  created=%s\n", marker, ++i, $1, $2, $4
-  }
-  END {
-    if (i == 0) {
-      print "No saved secrets yet."
-    }
-  }' "${SECRETS_FILE}"
-}
-
-select_secret_from_store() {
-  local rows_count choice row
-  secret_store_init
-  rows_count="$(secret_count)"
-  [[ "${rows_count}" -gt 0 ]] || die "No saved secrets"
-
-  print_secret_list
-  read -r -p "Choose saved secret number: " choice
-  [[ "${choice}" =~ ^[0-9]+$ ]] || die "Invalid secret number"
-  (( choice >= 1 && choice <= rows_count )) || die "Secret number is out of range"
-
-  row="$(awk -F'\t' -v n="${choice}" 'NF >= 3 { i++; if (i == n) { print; exit } }' "${SECRETS_FILE}")"
-  IFS=$'\t' read -r ACTIVE_SECRET_LABEL DOMAIN SECRET _ <<< "${row}"
-  [[ -n "${ACTIVE_SECRET_LABEL}" && -n "${DOMAIN}" && -n "${SECRET}" ]] || die "Saved secret entry is invalid"
-}
-
-print_settings() {
-  cat <<EOF
-
-Current settings:
-  Domain:      ${DOMAIN:-not set}
-  Port:        ${PORT}
-  Secret:      ${ACTIVE_SECRET_LABEL:-default}
-  Image tag:   ${MTG_TAG}
-  IP mode:     ${PREFER_IP}
-  Concurrency: ${CONCURRENCY}
-  DNS:         ${DNS_RESOLVER}
-  Fronting:    ${FRONTING_HOST:-default}
-  Blocklist:   ${ENABLE_BLOCKLIST} ${BLOCKLIST_URL}
-  Allowlist:   ${ENABLE_ALLOWLIST} ${ALLOWLIST_CIDRS}
-  Nginx decoy: ${ENABLE_NGINX_DISGUISE} port=${DISGUISE_HTTP_PORT}
-EOF
-}
-
-prompt_install_settings() {
-  local old_domain old_secret regenerate
-
-  load_state
-  old_domain="${DOMAIN:-}"
-  old_secret="$(current_secret)"
-
-  print_settings
-  echo
-  prompt_value "FakeTLS domain" DOMAIN "${DOMAIN:-proxy.your-domain.com}"
-  prompt_value "Public port" PORT "${PORT:-443}"
-  prompt_value "Docker image tag" MTG_TAG "${MTG_TAG:-2.2.8}"
-  prompt_prefer_ip
-  prompt_value "Max connections" CONCURRENCY "${CONCURRENCY:-8192}"
-  prompt_value "DNS resolver" DNS_RESOLVER "${DNS_RESOLVER:-https://1.1.1.1}"
-  prompt_value "Fallback/fronting backend host, empty for default" FRONTING_HOST "${FRONTING_HOST:-}"
-  if prompt_yes_no "Enable mtg blocklist profile" "${ENABLE_BLOCKLIST:-0}"; then
-    ENABLE_BLOCKLIST=1
-    prompt_value "Blocklist URL" BLOCKLIST_URL "${BLOCKLIST_URL:-https://iplists.firehol.org/files/firehol_abusers_1d.netset}"
-  else
-    ENABLE_BLOCKLIST=0
-  fi
-  prompt_value "Active secret label" ACTIVE_SECRET_LABEL "${ACTIVE_SECRET_LABEL:-default}"
-
-  if prompt_yes_no "Enable mtg IP allowlist profile" "${ENABLE_ALLOWLIST:-0}"; then
-    ENABLE_ALLOWLIST=1
-    prompt_value "Allowed client CIDRs, comma or space separated" ALLOWLIST_CIDRS "${ALLOWLIST_CIDRS:-}"
-  else
-    ENABLE_ALLOWLIST=0
-  fi
-
-  if prompt_yes_no "Enable Nginx HTTP disguise profile" "${ENABLE_NGINX_DISGUISE:-0}"; then
-    ENABLE_NGINX_DISGUISE=1
-    prompt_value "Nginx server_name" DISGUISE_SERVER_NAME "${DISGUISE_SERVER_NAME:-${DOMAIN:-_}}"
-    prompt_value "Nginx HTTP port" DISGUISE_HTTP_PORT "${DISGUISE_HTTP_PORT:-80}"
-  else
-    ENABLE_NGINX_DISGUISE=0
-  fi
-
-  if prompt_yes_no "Run BBR/NAT diagnostics after install" "${RUN_BBR_NAT_CHECK:-0}"; then
-    RUN_BBR_NAT_CHECK=1
-  else
-    RUN_BBR_NAT_CHECK=0
-  fi
-
-  SECRET=""
-  if [[ -n "${old_secret}" ]]; then
-    if [[ "${DOMAIN}" == "${old_domain}" ]]; then
-      read -r -p "Keep existing proxy secret? [Y/n]: " regenerate
-      case "${regenerate}" in
-        n|N|no|NO|No) SECRET="" ;;
-        *) SECRET="${old_secret}" ;;
-      esac
-    else
-      read -r -p "Domain changed. Generate a new secret for ${DOMAIN}? [Y/n]: " regenerate
-      case "${regenerate}" in
-        n|N|no|NO|No) SECRET="${old_secret}" ;;
-        *) SECRET="" ;;
-      esac
-    fi
-  fi
-}
-
-installer_uninstall() {
-  local purge_answer purge
-
-  purge=0
-  read -r -p "Remove /etc/mtg config too? [y/N]: " purge_answer
-  case "${purge_answer}" in
-    y|Y|yes|YES|Yes) purge=1 ;;
-  esac
-
-  log "Removing ${SERVICE_NAME}"
-  systemctl disable --now "${SERVICE_NAME}" || true
-  if cmd_exists docker; then
-    docker rm -f "${CONTAINER_NAME}" || true
-  fi
-  rm -f "${SYSTEMD_FILE}" "${CONTROL_BIN}"
-  systemctl daemon-reload
-
-  if [[ "${purge}" -eq 1 ]]; then
-    rm -rf "${CONFIG_DIR}"
-    log "Removed service, container and ${CONFIG_DIR}"
-  else
-    log "Removed service and container. Config kept in ${CONFIG_DIR}"
-  fi
-}
-
-menu_access() {
-  if [[ -x "${CONTROL_BIN}" ]]; then
-    "${CONTROL_BIN}" qr || true
-  elif cmd_exists docker && [[ -f "${CONFIG_FILE}" ]]; then
-    load_state
-    docker run --rm -v "${CONFIG_FILE}:/config.toml:ro" "nineseconds/mtg:${MTG_TAG}" access /config.toml || true
-  else
-    warn "Proxy is not installed yet. Use menu option 1 first."
-  fi
-}
-
-menu_status() {
-  systemctl status "${SERVICE_NAME}" --no-pager || true
-  if cmd_exists docker; then
-    docker ps --filter "name=${CONTAINER_NAME}" || true
-  fi
-}
-
-menu_logs() {
-  journalctl -u "${SERVICE_NAME}" -n 100 --no-pager || true
-}
-
-menu_doctor_speedtest() {
-  if [[ -x "${CONTROL_BIN}" ]]; then
-    "${CONTROL_BIN}" doctor || true
-    echo
-    "${CONTROL_BIN}" speedtest || true
-  else
-    warn "Proxy is not installed yet. Use menu option 1 first."
-  fi
-}
-
-menu_restart() {
-  if systemctl restart "${SERVICE_NAME}"; then
-    systemctl status "${SERVICE_NAME}" --no-pager || true
-  else
-    warn "Could not restart ${SERVICE_NAME}. Is the proxy installed?"
-  fi
-}
-
-reload_proxy_config() {
-  local installed_secret
-
-  installed_secret="$(current_secret)"
-  SECRET="${SECRET:-${installed_secret}}"
-  [[ -n "${SECRET}" ]] || die "No active secret found. Install the proxy first."
-
-  validate_input
-  fake_tls_domain_preflight
-  write_config
-  write_systemd_unit
-  write_control_script
-  configure_nginx_disguise
-
-  if systemctl list-unit-files "${SERVICE_NAME}" >/dev/null 2>&1; then
-    systemctl restart "${SERVICE_NAME}" || die "Could not restart ${SERVICE_NAME}"
-  fi
-
-  run_doctor
-  show_access
-}
-
-menu_bbr_nat_check() {
-  if [[ -x "${CONTROL_BIN}" ]]; then
-    "${CONTROL_BIN}" bbr-nat || true
-  else
-    bbr_nat_check || true
-  fi
-}
-
-menu_secret_add_switch() {
-  local choice label domain imported
-
-  load_state
-  ensure_docker
-  secret_store_init
-
-  cat <<EOF
-Secret management
-
-mtg v2 supports one active secret. This menu keeps saved secrets and switches
-which one is active in /etc/mtg/config.toml.
-
-1) Generate/import a new saved secret
-2) Switch to an existing saved secret
-0) Back
-EOF
-  read -r -p "Choose option: " choice
-
-  case "${choice}" in
-    1)
-      prompt_value "Secret label" label "default"
-      validate_secret_label "${label}"
-      prompt_value "FakeTLS domain for this secret" domain "${DOMAIN:-proxy.your-domain.com}"
-      read -r -p "Paste existing secret or leave empty to generate: " imported
-
-      DOMAIN="${domain}"
-      if [[ -n "${imported}" ]]; then
-        SECRET="${imported}"
-      else
-        SECRET="$(generate_secret_for_domain "${DOMAIN}")"
-      fi
-
-      store_secret "${label}" "${DOMAIN}" "${SECRET}"
-
-      if prompt_yes_no "Make this secret active now" 1; then
-        ACTIVE_SECRET_LABEL="${label}"
-        reload_proxy_config
-      else
-        log "Saved secret '${label}'. It is not active yet."
-      fi
-      ;;
-    2)
-      select_secret_from_store
-      reload_proxy_config
-      ;;
-    0|"")
-      return
-      ;;
-    *)
-      warn "Unknown secret menu option"
-      ;;
-  esac
-}
-
-menu_secret_revoke() {
-  local rows_count choice row label was_active
-
-  load_state
-  secret_store_init
-  rows_count="$(secret_count)"
-  [[ "${rows_count}" -gt 0 ]] || {
-    warn "No saved secrets to revoke"
-    return
-  }
-
-  print_secret_list
-  read -r -p "Choose secret number to revoke: " choice
-  [[ "${choice}" =~ ^[0-9]+$ ]] || die "Invalid secret number"
-  (( choice >= 1 && choice <= rows_count )) || die "Secret number is out of range"
-
-  row="$(awk -F'\t' -v n="${choice}" 'NF >= 3 { i++; if (i == n) { print; exit } }' "${SECRETS_FILE}")"
-  IFS=$'\t' read -r label _ _ _ <<< "${row}"
-  was_active=0
-  [[ "${label}" == "${ACTIVE_SECRET_LABEL:-default}" ]] && was_active=1
-
-  remove_secret "${label}"
-  log "Revoked saved secret '${label}'"
-
-  if [[ "${was_active}" -eq 1 ]]; then
-    if [[ "$(secret_count)" -gt 0 ]]; then
-      warn "You revoked the active secret. Choose a replacement."
-      select_secret_from_store
-      reload_proxy_config
-    else
-      warn "No saved secrets left. Generate a replacement now."
-      SECRET=""
-      prompt_value "FakeTLS domain" DOMAIN "${DOMAIN:-proxy.your-domain.com}"
-      SECRET="$(generate_secret_for_domain "${DOMAIN}")"
-      ACTIVE_SECRET_LABEL="default"
-      store_secret "${ACTIVE_SECRET_LABEL}" "${DOMAIN}" "${SECRET}"
-      reload_proxy_config
-    fi
-  fi
-}
-
-menu_secret_regenerate() {
-  load_state
-  ensure_docker
-  prompt_value "FakeTLS domain" DOMAIN "${DOMAIN:-proxy.your-domain.com}"
-  prompt_value "Active secret label" ACTIVE_SECRET_LABEL "${ACTIVE_SECRET_LABEL:-default}"
-  SECRET="$(generate_secret_for_domain "${DOMAIN}")"
-  store_secret "${ACTIVE_SECRET_LABEL}" "${DOMAIN}" "${SECRET}"
-  reload_proxy_config
-}
-
-menu_profiles() {
-  load_state
-  SECRET="$(current_secret)"
-  [[ -n "${SECRET}" ]] || {
-    warn "Proxy is not installed yet. Use menu option 1 first."
-    return
-  }
-
-  if prompt_yes_no "Enable mtg IP allowlist profile" "${ENABLE_ALLOWLIST:-0}"; then
-    ENABLE_ALLOWLIST=1
-    prompt_value "Allowed client CIDRs, comma or space separated" ALLOWLIST_CIDRS "${ALLOWLIST_CIDRS:-}"
-  else
-    ENABLE_ALLOWLIST=0
-  fi
-
-  if prompt_yes_no "Enable Nginx HTTP disguise profile" "${ENABLE_NGINX_DISGUISE:-0}"; then
-    ENABLE_NGINX_DISGUISE=1
-    prompt_value "Nginx server_name" DISGUISE_SERVER_NAME "${DISGUISE_SERVER_NAME:-${DOMAIN:-_}}"
-    prompt_value "Nginx HTTP port" DISGUISE_HTTP_PORT "${DISGUISE_HTTP_PORT:-80}"
-  else
-    ENABLE_NGINX_DISGUISE=0
-  fi
-
-  reload_proxy_config
-}
-
-menu_loop() {
-  local choice
-
-  while true; do
-    clear || true
-    load_state
-    cat <<EOF
-Clean MTG Proxy Installer
-
-1) Install / update proxy
-2) Change settings and reinstall
-3) Show proxy link + QR
-4) Show status
-5) Show logs
-6) Run mtg doctor + speedtest
-7) Run BBR/NAT diagnostics
-8) Add / switch secret
-9) Revoke secret
-10) Regenerate active secret
-11) Configure Nginx disguise / allowlist
-12) Restart proxy
-13) Remove proxy
-0) Exit
-EOF
-    echo
-    read -r -p "Choose option: " choice
-
-    case "${choice}" in
-      1|2)
-        prompt_install_settings
-        validate_input
-        install_proxy
-        pause
-        ;;
-      3)
-        menu_access
-        pause
-        ;;
-      4)
-        menu_status
-        pause
-        ;;
-      5)
-        menu_logs
-        pause
-        ;;
-      6)
-        menu_doctor_speedtest
-        pause
-        ;;
-      7)
-        menu_bbr_nat_check
-        pause
-        ;;
-      8)
-        menu_secret_add_switch
-        pause
-        ;;
-      9)
-        menu_secret_revoke
-        pause
-        ;;
-      10)
-        menu_secret_regenerate
-        pause
-        ;;
-      11)
-        menu_profiles
-        pause
-        ;;
-      12)
-        menu_restart
-        pause
-        ;;
-      13)
-        installer_uninstall
-        pause
-        ;;
-      0)
-        exit 0
-        ;;
-      *)
-        warn "Unknown menu option"
-        pause
-        ;;
-    esac
-  done
+validate_input() {
+  [[ "${PORT}" =~ ^[0-9]+$ ]] || die "Port must be a number"
+  (( PORT >= 1 && PORT <= 65535 )) || die "Port must be between 1 and 65535"
+  validate_label "${SECRET_LABEL}"
+  [[ -z "${SECRET}" ]] || validate_secret "${SECRET}"
+  [[ -z "${PUBLIC_HOST}" ]] || validate_host "${PUBLIC_HOST}"
+  [[ "${TELEMT_TAG}" =~ ^[A-Za-z0-9._-]+$ ]] || die "Container tag contains unsupported characters"
+  [[ "${TELEMT_IMAGE}" =~ ^[A-Za-z0-9./:_@-]+$ ]] || die "Container image contains unsupported characters"
+  case "${PREFER_IPV6}" in 0|1) ;; *) die "PREFER_IPV6 must be 0 or 1" ;; esac
+  case "${USE_MIDDLE_PROXY}" in 0|1) ;; *) die "USE_MIDDLE_PROXY must be 0 or 1" ;; esac
 }
 
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --domain)
-        DOMAIN="${2:-}"; shift 2 ;;
       --port)
-        PORT="${2:-}"; shift 2 ;;
+        [[ $# -ge 2 ]] || die "Missing value for --port"
+        PORT="$2"; shift 2 ;;
+      --server|--public-host)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        PUBLIC_HOST="$2"; shift 2 ;;
       --secret)
-        SECRET="${2:-}"; shift 2 ;;
+        [[ $# -ge 2 ]] || die "Missing value for --secret"
+        SECRET="$2"; shift 2 ;;
       --secret-label)
-        ACTIVE_SECRET_LABEL="${2:-}"; shift 2 ;;
+        [[ $# -ge 2 ]] || die "Missing value for --secret-label"
+        SECRET_LABEL="$2"; shift 2 ;;
       --tag)
-        MTG_TAG="${2:-}"; shift 2 ;;
-      --prefer-ip)
-        PREFER_IP="${2:-}"; shift 2 ;;
-      --concurrency)
-        CONCURRENCY="${2:-}"; shift 2 ;;
-      --dns)
-        DNS_RESOLVER="${2:-}"; shift 2 ;;
-      --fronting-host)
-        FRONTING_HOST="${2:-}"; shift 2 ;;
-      --enable-blocklist)
-        ENABLE_BLOCKLIST=1; shift ;;
-      --disable-blocklist)
-        ENABLE_BLOCKLIST=0; shift ;;
-      --blocklist)
-        ENABLE_BLOCKLIST=1; BLOCKLIST_URL="${2:-}"; shift 2 ;;
-      --allowlist)
-        ENABLE_ALLOWLIST=1; ALLOWLIST_CIDRS="${2:-}"; shift 2 ;;
-      --nginx-disguise)
-        ENABLE_NGINX_DISGUISE=1; shift ;;
-      --disable-nginx-disguise)
-        ENABLE_NGINX_DISGUISE=0; shift ;;
-      --disguise-server-name)
-        DISGUISE_SERVER_NAME="${2:-}"; shift 2 ;;
-      --disguise-port)
-        DISGUISE_HTTP_PORT="${2:-}"; shift 2 ;;
+        [[ $# -ge 2 ]] || die "Missing value for --tag"
+        TELEMT_TAG="$2"
+        TELEMT_IMAGE="ghcr.io/telemt/telemt:${TELEMT_TAG}"
+        shift 2 ;;
+      --image)
+        [[ $# -ge 2 ]] || die "Missing value for --image"
+        TELEMT_IMAGE="$2"; shift 2 ;;
+      --prefer-ipv6)
+        PREFER_IPV6=1; shift ;;
+      --direct)
+        USE_MIDDLE_PROXY=0; shift ;;
+      --middle-proxy)
+        USE_MIDDLE_PROXY=1; shift ;;
       --bbr-nat-check)
         RUN_BBR_NAT_CHECK=1; shift ;;
       --skip-docker-install)
@@ -715,10 +180,19 @@ parse_args() {
         RUN_DOCTOR=0; shift ;;
       --strict-doctor)
         STRICT_DOCTOR=1; shift ;;
+      --no-strict-doctor)
+        STRICT_DOCTOR=0; shift ;;
+      --speedtest)
+        RUN_SPEEDTEST=1; shift ;;
       --skip-speedtest)
         RUN_SPEEDTEST=0; shift ;;
       --no-start)
         START_SERVICE=0; shift ;;
+      --domain|--fronting-host|--prefer-ip|--concurrency|--dns|--blocklist|--allowlist|--disguise-server-name|--disguise-port)
+        [[ $# -ge 2 ]] || die "Missing value for legacy option $1"
+        LEGACY_OPTIONS_USED=1; shift 2 ;;
+      --enable-blocklist|--disable-blocklist|--nginx-disguise|--disable-nginx-disguise)
+        LEGACY_OPTIONS_USED=1; shift ;;
       -h|--help)
         usage; exit 0 ;;
       *)
@@ -727,88 +201,15 @@ parse_args() {
   done
 }
 
-require_root() {
-  if [[ "${EUID}" -ne 0 ]]; then
-    die "Run as root: sudo bash install.sh"
-  fi
-
-  if ! cmd_exists systemctl; then
-    die "systemd is required. This installer targets ordinary Linux VPS images."
-  fi
-}
-
-normalize_allowlist_cidrs() {
-  printf '%s\n' "${ALLOWLIST_CIDRS}" | tr ',; ' '\n' | awk 'NF { print }'
-}
-
-validate_input() {
-  if [[ -z "${DOMAIN}" && -t 0 ]]; then
-    read -r -p "FakeTLS domain that resolves to this VPS IPv4: " DOMAIN
-  fi
-
-  [[ -n "${DOMAIN}" ]] || die "Missing --domain. Use a real domain you control, for example --domain proxy.your-domain.com"
-  [[ "${DOMAIN}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Domain contains unsupported characters: ${DOMAIN}"
-  [[ "${DOMAIN}" != .* && "${DOMAIN}" != *..* && "${DOMAIN}" == *.* ]] || die "Domain looks invalid: ${DOMAIN}"
-  [[ -z "${FRONTING_HOST}" || "${FRONTING_HOST}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Fronting host contains unsupported characters: ${FRONTING_HOST}"
-  [[ -z "${FRONTING_HOST}" || "${FRONTING_HOST}" == *.* ]] || die "Fronting host looks invalid: ${FRONTING_HOST}"
-
-  case "${DOMAIN}" in
-    example.com|example.net|example.org)
-      die "${DOMAIN} is a documentation placeholder. Use a real domain with an A record to this VPS IPv4."
-      ;;
-  esac
-
-  [[ "${PORT}" =~ ^[0-9]+$ ]] || die "Port must be a number"
-  (( PORT >= 1 && PORT <= 65535 )) || die "Port must be between 1 and 65535"
-
-  [[ "${DISGUISE_HTTP_PORT}" =~ ^[0-9]+$ ]] || die "Disguise port must be a number"
-  (( DISGUISE_HTTP_PORT >= 1 && DISGUISE_HTTP_PORT <= 65535 )) || die "Disguise port must be between 1 and 65535"
-  if [[ "${ENABLE_NGINX_DISGUISE}" -eq 1 && "${DISGUISE_HTTP_PORT}" == "${PORT}" ]]; then
-    die "Nginx disguise port must be different from the MTProto proxy port"
-  fi
-
-  [[ "${CONCURRENCY}" =~ ^[0-9]+$ ]] || die "Concurrency must be a number"
-  (( CONCURRENCY >= 1 )) || die "Concurrency must be greater than zero"
-
-  [[ "${MTG_TAG}" =~ ^[A-Za-z0-9._-]+$ ]] || die "Docker tag contains unsupported characters: ${MTG_TAG}"
-  validate_secret_label "${ACTIVE_SECRET_LABEL:-default}"
-
-  [[ "${DNS_RESOLVER}" != *\"* && "${DNS_RESOLVER}" != *\\* ]] || die "DNS resolver contains unsupported characters"
-  [[ "${BLOCKLIST_URL}" != *\"* && "${BLOCKLIST_URL}" != *\\* ]] || die "Blocklist URL contains unsupported characters"
-  [[ "${SECRET}" != *\"* && "${SECRET}" != *\\* ]] || die "Secret contains unsupported characters"
-  [[ "${ALLOWLIST_CIDRS}" != *\"* && "${ALLOWLIST_CIDRS}" != *\\* && "${ALLOWLIST_CIDRS}" != *"'"* ]] || die "Allowlist contains unsupported characters"
-  [[ "${DISGUISE_SERVER_NAME}" != *\"* && "${DISGUISE_SERVER_NAME}" != *\\* && "${DISGUISE_SERVER_NAME}" != *"'"* ]] || die "Disguise server name contains unsupported characters"
-
-  case "${PREFER_IP}" in
-    prefer-ipv4|prefer-ipv6|only-ipv4|only-ipv6) ;;
-    *) die "Unsupported --prefer-ip value: ${PREFER_IP}" ;;
-  esac
-
-  case "${ENABLE_BLOCKLIST}" in
-    0|1) ;;
-    *) die "ENABLE_BLOCKLIST must be 0 or 1" ;;
-  esac
-
-  [[ "${ENABLE_BLOCKLIST}" -eq 0 || -n "${BLOCKLIST_URL}" ]] || die "Blocklist URL is required when blocklist is enabled"
-
-  if [[ "${ENABLE_ALLOWLIST}" -eq 1 ]]; then
-    [[ -n "$(normalize_allowlist_cidrs)" ]] || die "--allowlist requires at least one CIDR"
-    while IFS= read -r cidr; do
-      [[ "${cidr}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ || "${cidr}" =~ ^[0-9A-Fa-f:]+/[0-9]{1,3}$ ]] \
-        || die "Allowlist entry is not a CIDR: ${cidr}"
-    done < <(normalize_allowlist_cidrs)
-  fi
-}
-
 detect_pkg_manager() {
   if cmd_exists apt-get; then
-    echo "apt"
+    printf 'apt\n'
   elif cmd_exists dnf; then
-    echo "dnf"
+    printf 'dnf\n'
   elif cmd_exists yum; then
-    echo "yum"
+    printf 'yum\n'
   else
-    echo "unknown"
+    printf 'unknown\n'
   fi
 }
 
@@ -834,336 +235,288 @@ install_packages() {
       yum install -y qrencode || warn "qrencode is unavailable; QR output will be skipped"
       ;;
     *)
-      warn "Unknown package manager. I will continue and rely on existing tools."
+      warn "Unknown package manager; using existing tools"
       ;;
   esac
-
   BASE_PACKAGES_READY=1
 }
 
 install_docker_from_packages() {
-  local pm
-  pm="$(detect_pkg_manager)"
-
-  case "${pm}" in
-    apt)
-      apt-get install -y docker.io
-      ;;
-    dnf)
-      dnf install -y moby-engine || dnf install -y docker
-      ;;
-    yum)
-      yum install -y moby-engine || yum install -y docker
-      ;;
-    *)
-      return 1
-      ;;
+  case "$(detect_pkg_manager)" in
+    apt) apt-get install -y docker.io ;;
+    dnf) dnf install -y moby-engine || dnf install -y docker ;;
+    yum) yum install -y moby-engine || yum install -y docker ;;
+    *) return 1 ;;
   esac
 }
 
 install_docker_official_script() {
   [[ "${ALLOW_DOCKER_SCRIPT}" -eq 1 ]] || return 1
   cmd_exists curl || return 1
-
-  warn "Falling back to Docker's official convenience script: https://get.docker.com"
+  warn "Using Docker's official convenience script"
   curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
   sh /tmp/get-docker.sh
   rm -f /tmp/get-docker.sh
 }
 
 ensure_docker() {
-  if cmd_exists docker; then
-    log "Docker is already installed"
-  else
-    [[ "${INSTALL_DOCKER}" -eq 1 ]] || die "Docker is not installed and --skip-docker-install was used"
+  if ! cmd_exists docker; then
+    [[ "${INSTALL_DOCKER}" -eq 1 ]] || die "Docker is not installed"
     install_packages
     log "Installing Docker"
     install_docker_from_packages || install_docker_official_script || die "Docker installation failed"
   fi
-
   systemctl enable --now docker
-  cmd_exists docker || die "Docker binary is still unavailable"
   docker info >/dev/null || die "Docker daemon is not responding"
-}
-
-confirm_overwrite() {
-  if [[ -f "${CONFIG_FILE}" ]]; then
-    local backup
-    backup="${CONFIG_FILE}.$(date +%Y%m%d-%H%M%S).bak"
-    cp -a "${CONFIG_FILE}" "${backup}"
-    warn "Existing config backed up to ${backup}"
-  fi
-}
-
-generate_secret_for_domain() {
-  local secret_domain generated_secret
-  secret_domain="$1"
-
-  docker pull "nineseconds/mtg:${MTG_TAG}" >/dev/null
-  generated_secret="$(docker run --rm "nineseconds/mtg:${MTG_TAG}" generate-secret "${secret_domain}" | tr -d '\r\n ')"
-  [[ -n "${generated_secret}" ]] || die "Could not generate secret"
-  printf '%s\n' "${generated_secret}"
-}
-
-generate_secret() {
-  if [[ -n "${SECRET}" ]]; then
-    log "Using provided secret"
-    return
-  fi
-
-  log "Generating FakeTLS secret for ${DOMAIN}"
-  SECRET="$(generate_secret_for_domain "${DOMAIN}")"
-  [[ -n "${SECRET}" ]] || die "Could not generate secret"
 }
 
 detect_public_ipv4() {
   local ip
-
   if cmd_exists curl; then
-    ip="$(curl -4 -fsS --max-time 5 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
-    if [[ -n "${ip}" ]]; then
-      printf '%s\n' "${ip}"
-      return 0
-    fi
-
-    ip="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null | tr -d '\r\n ' || true)"
-    if [[ -n "${ip}" ]]; then
+    ip="$(curl -4 -fsS --max-time 6 https://api.ipify.org 2>/dev/null | tr -d '\r\n ' || true)"
+    [[ -n "${ip}" ]] || ip="$(curl -4 -fsS --max-time 6 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
+    if [[ "${ip}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
       printf '%s\n' "${ip}"
       return 0
     fi
   fi
-
-  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }' || true)"
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
   [[ -n "${ip}" ]] && printf '%s\n' "${ip}"
 }
 
-resolve_domain_ipv4s() {
-  local domain
-  domain="$1"
-
-  if cmd_exists dig; then
-    dig @1.1.1.1 +short A "${domain}" 2>/dev/null | awk '/^[0-9.]+$/ { print }' | sort -u
-    return 0
+ensure_public_host() {
+  if [[ -z "${PUBLIC_HOST}" ]]; then
+    PUBLIC_HOST="$(detect_public_ipv4 || true)"
   fi
-
-  if cmd_exists host; then
-    host -t A "${domain}" 1.1.1.1 2>/dev/null | awk '/has address/ { print $4 }' | sort -u
-    return 0
-  fi
-
-  if cmd_exists getent; then
-    getent ahostsv4 "${domain}" 2>/dev/null | awk '{ print $1 }' | sort -u
-  fi
+  [[ -n "${PUBLIC_HOST}" ]] || die "Could not detect public IPv4; pass --server HOST"
+  validate_host "${PUBLIC_HOST}"
 }
 
-fake_tls_domain_preflight() {
-  local public4 resolved_ips resolved_line
-
-  [[ -n "${DOMAIN:-}" ]] || return
-
-  log "Checking FakeTLS domain DNS"
-  public4="$(detect_public_ipv4 || true)"
-  resolved_ips="$(resolve_domain_ipv4s "${DOMAIN}" || true)"
-  resolved_line="$(printf '%s\n' "${resolved_ips}" | awk 'BEGIN { sep = "" } NF { printf "%s%s", sep, $0; sep = ", " } END { print "" }')"
-
-  if [[ -z "${resolved_ips}" ]]; then
-    warn "Could not resolve ${DOMAIN} to IPv4. mtg doctor may fail SNI-DNS validation."
-    return
-  fi
-
-  if [[ -z "${public4}" ]]; then
-    warn "Could not detect this VPS public IPv4. Resolved ${DOMAIN} to: ${resolved_line}"
-    return
-  fi
-
-  if printf '%s\n' "${resolved_ips}" | grep -Fxq "${public4}"; then
-    log "FakeTLS domain ${DOMAIN} resolves to this VPS IPv4 (${public4})"
-    if [[ -z "${FRONTING_HOST}" ]]; then
-      warn "No --fronting-host is set. Rejected/probe traffic may loop back to mtg on ${public4}:443 and log fronting timeouts."
-    fi
-    if [[ "${PORT}" != "443" ]]; then
-      warn "Proxy port is ${PORT}, but FakeTLS fronting checks still use domain-fronting port 443. Keep a real TLS website on TCP/443 or expect doctor fronting warnings."
-    fi
-  else
-    warn "FakeTLS domain ${DOMAIN} resolves to [${resolved_line}], not this VPS IPv4 (${public4}). Use a domain you control with an A record to this VPS for best reliability."
-  fi
+generate_secret() {
+  openssl rand -hex 16
 }
 
-write_allowlist_file() {
-  log "Writing ${ALLOWLIST_FILE}"
+users_init() {
   mkdir -p "${CONFIG_DIR}"
-  {
-    echo "# clean-mtg-proxy allowlist"
-    echo "# One CIDR per line. Clients outside these ranges are rejected by mtg."
-    normalize_allowlist_cidrs
-  } > "${ALLOWLIST_FILE}"
-  chmod 0600 "${ALLOWLIST_FILE}"
+  chmod 0755 "${CONFIG_DIR}"
+  [[ -f "${USERS_FILE}" ]] || : > "${USERS_FILE}"
+  chmod 0600 "${USERS_FILE}"
+}
+
+user_count() {
+  users_init
+  awk -F'\t' 'NF >= 2 {n++} END {print n + 0}' "${USERS_FILE}"
+}
+
+user_exists() {
+  local label="$1"
+  users_init
+  awk -F'\t' -v label="${label}" 'NF >= 2 && $1 == label {found=1} END {exit !found}' "${USERS_FILE}"
+}
+
+user_secret() {
+  local label="$1"
+  users_init
+  awk -F'\t' -v label="${label}" 'NF >= 2 && $1 == label {print $2; exit}' "${USERS_FILE}"
+}
+
+upsert_user() {
+  local label="$1" secret="$2" now tmp
+  validate_label "${label}"
+  validate_secret "${secret}"
+  users_init
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  tmp="$(mktemp)"
+  awk -F'\t' -v label="${label}" 'BEGIN{OFS=FS} NF >= 2 && $1 != label {print}' "${USERS_FILE}" > "${tmp}"
+  printf '%s\t%s\t%s\n' "${label}" "${secret,,}" "${now}" >> "${tmp}"
+  mv "${tmp}" "${USERS_FILE}"
+  chmod 0600 "${USERS_FILE}"
+}
+
+remove_user() {
+  local label="$1" tmp
+  users_init
+  tmp="$(mktemp)"
+  awk -F'\t' -v label="${label}" 'BEGIN{OFS=FS} NF >= 2 && $1 != label {print}' "${USERS_FILE}" > "${tmp}"
+  mv "${tmp}" "${USERS_FILE}"
+  chmod 0600 "${USERS_FILE}"
+}
+
+list_users() {
+  users_init
+  awk -F'\t' 'NF >= 2 {printf "%d) %s  created=%s\n", ++n, $1, $3} END {if (!n) print "No users"}' "${USERS_FILE}"
+}
+
+select_user_label() {
+  local choice count label
+  count="$(user_count)"
+  (( count > 0 )) || die "No proxy users"
+  list_users >&2
+  read -r -p "Choose user number: " choice
+  [[ "${choice}" =~ ^[0-9]+$ ]] || die "Invalid user number"
+  (( choice >= 1 && choice <= count )) || die "User number is out of range"
+  label="$(awk -F'\t' -v n="${choice}" 'NF >= 2 {i++; if (i==n) {print $1; exit}}' "${USERS_FILE}")"
+  [[ -n "${label}" ]] || die "Could not select user"
+  printf '%s\n' "${label}"
+}
+
+ensure_initial_user() {
+  users_init
+  if [[ -n "${SECRET}" ]]; then
+    upsert_user "${SECRET_LABEL}" "${SECRET}"
+  elif [[ "$(user_count)" -eq 0 ]]; then
+    SECRET="$(generate_secret)"
+    upsert_user "${SECRET_LABEL}" "${SECRET}"
+  fi
+}
+
+backup_file() {
+  local path="$1"
+  if [[ -f "${path}" ]]; then
+    cp -a "${path}" "${path}.$(date +%Y%m%d-%H%M%S).bak"
+  fi
 }
 
 write_config() {
-  local allowlist_enabled allowlist_urls blocklist_enabled fronting_host_line
+  local prefer_ipv6 middle_proxy me2dc_fast label secret
+  prefer_ipv6=false
+  middle_proxy=false
+  me2dc_fast=false
+  [[ "${PREFER_IPV6}" -eq 1 ]] && prefer_ipv6=true
+  [[ "${USE_MIDDLE_PROXY}" -eq 1 ]] && middle_proxy=true
+  [[ "${ME2DC_FAST}" -eq 1 ]] && me2dc_fast=true
 
   log "Writing ${CONFIG_FILE}"
   mkdir -p "${CONFIG_DIR}"
-  chmod 0755 "${CONFIG_DIR}"
-  confirm_overwrite
+  backup_file "${CONFIG_FILE}"
+  {
+    cat <<EOF
+[general]
+use_middle_proxy = ${middle_proxy}
+prefer_ipv6 = ${prefer_ipv6}
+me2dc_fallback = true
+me2dc_fast = ${me2dc_fast}
+log_level = "normal"
 
-  allowlist_enabled="false"
-  allowlist_urls=""
-  blocklist_enabled="false"
-  fronting_host_line=""
-  if [[ "${ENABLE_BLOCKLIST}" -eq 1 ]]; then
-    blocklist_enabled="true"
-  fi
-  if [[ -n "${FRONTING_HOST}" ]]; then
-    fronting_host_line="host = \"${FRONTING_HOST}\""
-  fi
+[general.modes]
+classic = false
+secure = true
+tls = false
 
-  if [[ "${ENABLE_ALLOWLIST}" -eq 1 ]]; then
-    write_allowlist_file
-    allowlist_enabled="true"
-    allowlist_urls="  \"${ALLOWLIST_FILE}\","
-  fi
+[general.links]
+show = []
+public_host = "${PUBLIC_HOST}"
+public_port = ${PORT}
 
-  cat > "${CONFIG_FILE}" <<EOF
-secret = "${SECRET}"
-bind-to = "0.0.0.0:3128"
-concurrency = ${CONCURRENCY}
-prefer-ip = "${PREFER_IP}"
-auto-update = false
-tolerate-time-skewness = "5s"
-allow-fallback-on-unknown-dc = true
+[server]
+port = 3128
 
-[domain-fronting]
-${fronting_host_line}
-port = 443
-
-[network]
-dns = "${DNS_RESOLVER}"
-
-[network.timeout]
-tcp = "5s"
-http = "10s"
-idle = "5m"
-handshake = "10s"
-
-[network.keep-alive]
-disabled = false
-idle = "15s"
-interval = "15s"
-count = 9
-
-[defense.anti-replay]
+[server.api]
 enabled = true
-max-size = "2mib"
-error-rate = 0.001
+listen = "127.0.0.1:9091"
+whitelist = ["127.0.0.1/32", "::1/128"]
+read_only = true
+minimal_runtime_enabled = false
 
-[defense.blocklist]
-enabled = ${blocklist_enabled}
-download-concurrency = 2
-urls = [
-  "${BLOCKLIST_URL}",
-]
-update-each = "24h"
+[[server.listeners]]
+ip = "0.0.0.0"
 
-[defense.allowlist]
-enabled = ${allowlist_enabled}
-download-concurrency = 2
-urls = [
-${allowlist_urls}
-]
-update-each = "24h"
+[censorship]
+mask = false
+tls_emulation = false
 
-[stats.statsd]
-enabled = false
-address = "127.0.0.1:8888"
-metric-prefix = "mtg"
-tag-format = "datadog"
-
-[stats.prometheus]
-enabled = true
-bind-to = "127.0.0.1:3129"
-http-path = "/"
-metric-prefix = "mtg"
+[access.users]
 EOF
+    while IFS=$'\t' read -r label secret _; do
+      [[ -n "${label}" && -n "${secret}" ]] || continue
+      printf '"%s" = "%s"\n' "${label}" "${secret}"
+    done < "${USERS_FILE}"
+  } > "${CONFIG_FILE}"
+  chmod 0640 "${CONFIG_FILE}"
+  if [[ "${CLEAN_MTG_TEST_MODE:-0}" != "1" ]]; then
+    chown 0:65532 "${CONFIG_FILE}"
+  fi
+}
 
-  chmod 0600 "${CONFIG_FILE}"
-
-cat > "${STATE_FILE}" <<EOF
-DOMAIN='${DOMAIN}'
-PORT='${PORT}'
-ACTIVE_SECRET_LABEL='${ACTIVE_SECRET_LABEL}'
-MTG_TAG='${MTG_TAG}'
-PREFER_IP='${PREFER_IP}'
-CONCURRENCY='${CONCURRENCY}'
-DNS_RESOLVER='${DNS_RESOLVER}'
-FRONTING_HOST='${FRONTING_HOST}'
-ENABLE_BLOCKLIST='${ENABLE_BLOCKLIST}'
-BLOCKLIST_URL='${BLOCKLIST_URL}'
-ENABLE_ALLOWLIST='${ENABLE_ALLOWLIST}'
-ALLOWLIST_CIDRS='${ALLOWLIST_CIDRS}'
-ENABLE_NGINX_DISGUISE='${ENABLE_NGINX_DISGUISE}'
-DISGUISE_SERVER_NAME='${DISGUISE_SERVER_NAME}'
-DISGUISE_HTTP_PORT='${DISGUISE_HTTP_PORT}'
-CONTAINER_NAME='${CONTAINER_NAME}'
-CONFIG_FILE='${CONFIG_FILE}'
-EOF
+write_state() {
+  {
+    printf 'PORT=%s\n' "$(shell_quote "${PORT}")"
+    printf 'PUBLIC_HOST=%s\n' "$(shell_quote "${PUBLIC_HOST}")"
+    printf 'SECRET_LABEL=%s\n' "$(shell_quote "${SECRET_LABEL}")"
+    printf 'TELEMT_TAG=%s\n' "$(shell_quote "${TELEMT_TAG}")"
+    printf 'TELEMT_IMAGE=%s\n' "$(shell_quote "${TELEMT_IMAGE}")"
+    printf 'PREFER_IPV6=%s\n' "$(shell_quote "${PREFER_IPV6}")"
+    printf 'USE_MIDDLE_PROXY=%s\n' "$(shell_quote "${USE_MIDDLE_PROXY}")"
+    printf 'ME2DC_FAST=%s\n' "$(shell_quote "${ME2DC_FAST}")"
+  } > "${STATE_FILE}"
   chmod 0600 "${STATE_FILE}"
+}
+
+docker_bin_path() {
+  command -v docker
 }
 
 write_systemd_unit() {
   local docker_bin
-  docker_bin="$(command -v docker)"
+  docker_bin="$(docker_bin_path)"
   log "Writing ${SYSTEMD_FILE}"
-
   cat > "${SYSTEMD_FILE}" <<EOF
 [Unit]
-Description=mtg MTProto proxy for Telegram (Docker)
-Documentation=https://github.com/9seconds/mtg
+Description=Clean MTProto proxy (Telemt secure mode)
+Documentation=https://github.com/telemt/telemt
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
 
 [Service]
+Type=simple
 Restart=always
 RestartSec=5
-TimeoutStartSec=0
-LimitNOFILE=65536
+TimeoutStartSec=30
+TimeoutStopSec=20
+LimitNOFILE=262144
 ExecStartPre=/bin/sh -c '${docker_bin} rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true'
-ExecStartPre=${docker_bin} pull nineseconds/mtg:${MTG_TAG}
 ExecStart=${docker_bin} run --rm --name ${CONTAINER_NAME} \\
   --publish ${PORT}:3128/tcp \\
-  --volume ${CONFIG_FILE}:/config.toml:ro \\
-  --ulimit nofile=65536:65536 \\
+  --volume ${CONFIG_FILE}:/app/config.toml:ro \\
+  --user 65532:65532 \\
+  --workdir /run/telemt \\
+  --read-only \\
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \\
+  --tmpfs /run/telemt:rw,nosuid,nodev,noexec,mode=1777,size=16m \\
+  --cap-drop ALL \\
+  --security-opt no-new-privileges:true \\
+  --ulimit nofile=65536:262144 \\
   --log-driver json-file \\
   --log-opt max-size=10m \\
   --log-opt max-file=5 \\
-  nineseconds/mtg:${MTG_TAG} run /config.toml
-ExecStop=${docker_bin} stop -t 10 ${CONTAINER_NAME}
+  ${TELEMT_IMAGE} /app/config.toml
+ExecStop=-${docker_bin} stop -t 10 ${CONTAINER_NAME}
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
   chmod 0644 "${SYSTEMD_FILE}"
   systemctl daemon-reload
 }
 
 write_control_script() {
   log "Writing ${CONTROL_BIN}"
-
-  cat > "${CONTROL_BIN}" <<'EOF'
+  cat > "${CONTROL_BIN}" <<'CONTROL_EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SERVICE_NAME="mtg.service"
-STATE_FILE="/etc/mtg/install.env"
-CONFIG_FILE="/etc/mtg/config.toml"
-SECRETS_FILE="/etc/mtg/secrets.tsv"
-ALLOWLIST_FILE="/etc/mtg/allowlist.netset"
-CONTAINER_NAME="mtg-proxy"
+SERVICE_NAME="telemt-proxy.service"
+CONTAINER_NAME="telemt-proxy"
+CONFIG_DIR="/etc/clean-mtg-proxy"
+CONFIG_FILE="${CONFIG_DIR}/config.toml"
+STATE_FILE="${CONFIG_DIR}/install.env"
+USERS_FILE="${CONFIG_DIR}/users.tsv"
+SYSTEMD_FILE="/etc/systemd/system/${SERVICE_NAME}"
+CONTROL_BIN="/usr/local/bin/mtgctl"
 PORT="443"
-MTG_TAG="2.2.8"
+PUBLIC_HOST=""
+TELEMT_IMAGE="ghcr.io/telemt/telemt:3.4.23"
 
 if [[ -f "${STATE_FILE}" ]]; then
   # shellcheck disable=SC1090
@@ -1171,307 +524,225 @@ if [[ -f "${STATE_FILE}" ]]; then
 fi
 
 usage() {
-  cat <<USAGE
-mtgctl - helper for clean mtg proxy installation
-
-Usage:
-  sudo mtgctl status
-  sudo mtgctl logs [lines]
-  sudo mtgctl follow
-  sudo mtgctl doctor
-  sudo mtgctl access
-  sudo mtgctl qr
-  sudo mtgctl raw-access
-  sudo mtgctl speedtest
-  sudo mtgctl bbr-nat
-  sudo mtgctl restart
-  sudo mtgctl stop
-  sudo mtgctl start
-  sudo mtgctl uninstall [--purge]
-USAGE
+  cat <<'EOF'
+mtgctl commands:
+  status                 Service, container and listener status
+  logs [LINES]           Recent logs
+  follow                 Follow logs
+  doctor                 Liveness, readiness, port and Telegram checks
+  access [LABEL]         Show secure proxy links
+  qr [LABEL]             Show links and local QR codes
+  users                  List proxy users
+  add LABEL [SECRET]     Add an active secret
+  revoke LABEL           Revoke a secret (last secret is protected)
+  regenerate LABEL       Replace a secret
+  speedtest              Telegram TCP and HTTPS speed checks
+  bbr-nat                Show BBR, NAT and listener information
+  update                 Pull the configured image and restart
+  restart|start|stop     Control the service
+  uninstall [--purge]    Remove service; optionally remove configuration
+EOF
 }
 
-need_root_for() {
-  case "${1:-}" in
-    logs|follow|status|doctor|access|qr|raw-access|speedtest|bbr-nat|help|-h|--help) return 0 ;;
-  esac
-  if [[ "${EUID}" -ne 0 ]]; then
-    echo "Run this command with sudo" >&2
-    exit 1
-  fi
+need_root() {
+  [[ "${EUID}" -eq 0 ]] || { echo "Run with sudo" >&2; exit 1; }
 }
 
-doctor() {
-  docker run --rm -v "${CONFIG_FILE}:/config.toml:ro" "nineseconds/mtg:${MTG_TAG}" doctor /config.toml
+validate_label() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Invalid label" >&2; exit 1; }
 }
 
-active_secret() {
-  local secret
-
-  secret="$(awk -F'"' '/^secret[[:space:]]*=/{ print $2; exit }' "${CONFIG_FILE}" 2>/dev/null || true)"
-  if [[ -n "${secret}" ]]; then
-    printf '%s\n' "${secret}"
-    return 0
-  fi
-
-  if [[ -f "${SECRETS_FILE}" ]]; then
-    awk -F'\t' -v label="${ACTIVE_SECRET_LABEL:-default}" 'NF >= 3 && $1 == label { print $3; exit }' "${SECRETS_FILE}" 2>/dev/null || true
-  fi
+validate_secret() {
+  [[ "$1" =~ ^[0-9A-Fa-f]{32}$ ]] || { echo "Secret must be 32 hex characters" >&2; exit 1; }
 }
 
-detect_public_server() {
-  local public4 public6 local4
+generate_secret() {
+  openssl rand -hex 16
+}
 
-  if [[ -n "${SERVER_HOST:-}" ]]; then
-    printf '%s\n' "${SERVER_HOST}"
-    return 0
-  fi
+user_secret() {
+  local label="$1"
+  awk -F'\t' -v label="${label}" 'NF >= 2 && $1 == label {print $2; exit}' "${USERS_FILE}" 2>/dev/null || true
+}
 
-  if [[ -n "${PUBLIC_IP:-}" ]]; then
-    printf '%s\n' "${PUBLIC_IP}"
-    return 0
-  fi
+user_count() {
+  awk -F'\t' 'NF >= 2 {n++} END {print n + 0}' "${USERS_FILE}" 2>/dev/null || printf '0\n'
+}
 
-  if command -v curl >/dev/null 2>&1; then
-    public4="$(curl -4 -fsS --max-time 5 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
-    if [[ -n "${public4}" ]]; then
-      printf '%s\n' "${public4}"
-      return 0
+upsert_user() {
+  local label="$1" secret="$2" now tmp
+  validate_label "${label}"
+  validate_secret "${secret}"
+  mkdir -p "${CONFIG_DIR}"
+  touch "${USERS_FILE}"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  tmp="$(mktemp)"
+  awk -F'\t' -v label="${label}" 'BEGIN{OFS=FS} NF >= 2 && $1 != label {print}' "${USERS_FILE}" > "${tmp}"
+  printf '%s\t%s\t%s\n' "${label}" "${secret,,}" "${now}" >> "${tmp}"
+  mv "${tmp}" "${USERS_FILE}"
+  chmod 0600 "${USERS_FILE}"
+}
+
+rewrite_config_users() {
+  local tmp label secret
+  tmp="$(mktemp)"
+  awk '/^\[access\.users\]/{exit} {print}' "${CONFIG_FILE}" > "${tmp}"
+  printf '\n[access.users]\n' >> "${tmp}"
+  while IFS=$'\t' read -r label secret _; do
+    [[ -n "${label}" && -n "${secret}" ]] || continue
+    printf '"%s" = "%s"\n' "${label}" "${secret}" >> "${tmp}"
+  done < "${USERS_FILE}"
+  mv "${tmp}" "${CONFIG_FILE}"
+  chown 0:65532 "${CONFIG_FILE}"
+  chmod 0640 "${CONFIG_FILE}"
+}
+
+link_for() {
+  local label="$1" secret
+  secret="$(user_secret "${label}")"
+  [[ -n "${secret}" ]] || return 1
+  printf 'tg://proxy?server=%s&port=%s&secret=dd%s\n' "${PUBLIC_HOST}" "${PORT}" "${secret}"
+}
+
+https_link_for() {
+  local label="$1" secret
+  secret="$(user_secret "${label}")"
+  [[ -n "${secret}" ]] || return 1
+  printf 'https://t.me/proxy?server=%s&port=%s&secret=dd%s\n' "${PUBLIC_HOST}" "${PORT}" "${secret}"
+}
+
+access() {
+  local requested="${1:-}" label link found=0
+  [[ -f "${USERS_FILE}" ]] || { echo "No proxy users" >&2; return 1; }
+  while IFS=$'\t' read -r label _ _; do
+    [[ -n "${label}" ]] || continue
+    [[ -z "${requested}" || "${requested}" == "${label}" ]] || continue
+    found=1
+    link="$(link_for "${label}")"
+    printf '[%s]\n%s\n%s\n\n' "${label}" "${link}" "$(https_link_for "${label}")"
+  done < "${USERS_FILE}"
+  [[ "${found}" -eq 1 ]] || { echo "Unknown proxy user: ${requested}" >&2; return 1; }
+}
+
+qr() {
+  local requested="${1:-}" label link found=0
+  [[ -f "${USERS_FILE}" ]] || { echo "No proxy users" >&2; return 1; }
+  while IFS=$'\t' read -r label _ _; do
+    [[ -n "${label}" ]] || continue
+    [[ -z "${requested}" || "${requested}" == "${label}" ]] || continue
+    found=1
+    link="$(link_for "${label}")"
+    printf '[%s]\n%s\n' "${label}" "${link}"
+    if command -v qrencode >/dev/null 2>&1; then
+      qrencode -t ANSIUTF8 "${link}"
+    else
+      echo "qrencode is not installed"
     fi
-
-    public4="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null | tr -d '\r\n ' || true)"
-    if [[ -n "${public4}" ]]; then
-      printf '%s\n' "${public4}"
-      return 0
-    fi
-
-    public6="$(curl -6 -fsS --max-time 5 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
-    if [[ -n "${public6}" ]]; then
-      printf '%s\n' "${public6}"
-      return 0
-    fi
-  fi
-
-  local4="$(hostname -I 2>/dev/null | awk '{ print $1; exit }' || true)"
-  [[ -n "${local4}" ]] && printf '%s\n' "${local4}"
-}
-
-fallback_access_link() {
-  local server secret
-
-  secret="$(active_secret)"
-  server="$(detect_public_server)"
-
-  [[ -n "${server}" && -n "${PORT:-}" && -n "${secret}" ]] || return 1
-  printf 'tg://proxy?server=%s&port=%s&secret=%s\n' "${server}" "${PORT}" "${secret}"
-}
-
-hex_access_link_from() {
-  local server
-  server="$(detect_public_server)"
-
-  [[ -n "${server}" && -n "${PORT:-}" ]] || return 1
-  awk -F'"' -v server="${server}" -v port="${PORT}" '
-    /"hex"[[:space:]]*:/ { secret = $4 }
-    END {
-      if (secret != "") {
-        printf "tg://proxy?server=%s&port=%s&secret=%s\n", server, port, secret
-      }
-    }
-  '
-}
-
-public_access_link_from() {
-  local link server safe_server safe_port
-
-  link="$1"
-  server="$(detect_public_server)"
-
-  [[ -n "${link}" && -n "${server}" && -n "${PORT:-}" ]] || return 1
-
-  safe_server="$(printf '%s' "${server}" | sed 's/[\/&]/\\&/g')"
-  safe_port="$(printf '%s' "${PORT}" | sed 's/[\/&]/\\&/g')"
-  printf '%s\n' "${link}" | sed -E "s#([?&]server=)[^&]*#\1${safe_server}#; s#([?&]port=)[0-9]+#\1${safe_port}#"
-}
-
-official_access_link() {
-  awk -F'"' '
-    /"tg_url"[[:space:]]*:/ { print $4; exit }
-    /"tme_url"[[:space:]]*:/ { print $4; exit }
-  '
-}
-
-access_info() {
-  local output link official_link print_raw show_qr arg
-  print_raw=0
-  show_qr=1
-
-  for arg in "$@"; do
-    case "${arg}" in
-      --no-qr) show_qr=0 ;;
-      --raw) print_raw=1 ;;
-    esac
-  done
-
-  output="$(
-    docker exec "${CONTAINER_NAME}" /mtg access /config.toml 2>/dev/null \
-      || docker run --rm -v "${CONFIG_FILE}:/config.toml:ro" "nineseconds/mtg:${MTG_TAG}" access /config.toml 2>/dev/null \
-      || true
-  )"
-  if [[ "${print_raw}" -eq 1 && -n "${output}" ]]; then
-    printf '%s\n' "${output}"
-  fi
-
-  link="$(printf '%s\n' "${output}" | hex_access_link_from || true)"
-
-  if [[ -z "${link:-}" ]]; then
-    official_link="$(printf '%s\n' "${output}" | official_access_link || true)"
-  fi
-  if [[ -z "${link:-}" && -n "${official_link:-}" ]]; then
-    link="$(public_access_link_from "${official_link}" || true)"
-  fi
-
-  if [[ -z "${link:-}" ]]; then
-    link="$(fallback_access_link || true)"
-  fi
-
-  if [[ -n "${link}" ]]; then
     echo
-    echo "Public access link:"
-    printf '%s\n' "${link}"
-  else
-    link="$(printf '%s\n' "${output}" | awk 'match($0, /(https:\/\/t\.me\/proxy[^[:space:]",]+|tg:\/\/proxy[^[:space:]",]+)/) { print substr($0, RSTART, RLENGTH); exit }')"
-  fi
-
-  [[ "${show_qr}" -eq 0 ]] || print_qr "${link}"
+  done < "${USERS_FILE}"
+  [[ "${found}" -eq 1 ]] || { echo "Unknown proxy user: ${requested}" >&2; return 1; }
 }
 
-print_qr() {
-  local link
-  link="$1"
-  [[ -n "${link}" ]] || {
-    echo "No proxy link found for QR generation" >&2
-    return 1
-  }
-
-  echo
-  echo "== QR code =="
-  if command -v qrencode >/dev/null 2>&1; then
-    qrencode -t ANSIUTF8 "${link}"
-  else
-    echo "qrencode is not installed. Re-run installer or install package: qrencode"
-  fi
-}
-
-bbr_nat_check() {
-  local cc qdisc src4 src6 public4 public6
-
-  echo "== BBR / TCP =="
-  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-  qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
-  printf 'tcp_congestion_control: %s\n' "${cc:-unknown}"
-  printf 'default_qdisc:          %s\n' "${qdisc:-unknown}"
-  if [[ "${cc}" == "bbr" ]]; then
-    echo "BBR: enabled"
-  else
-    cat <<'TIP'
-BBR: not enabled. Optional commands:
-  echo "net.core.default_qdisc=fq" | sudo tee /etc/sysctl.d/99-clean-mtg-bbr.conf
-  echo "net.ipv4.tcp_congestion_control=bbr" | sudo tee -a /etc/sysctl.d/99-clean-mtg-bbr.conf
-  sudo sysctl --system
-TIP
-  fi
-
-  echo
-  echo "== NAT / public IP =="
-  src4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }' || true)"
-  src6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }' || true)"
-  if command -v curl >/dev/null 2>&1; then
-    public4="$(curl -4 -fsS --max-time 5 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
-    public6="$(curl -6 -fsS --max-time 5 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
-  else
-    public4=""
-    public6=""
-  fi
-
-  printf 'local IPv4 source: %s\n' "${src4:-unknown}"
-  printf 'public IPv4:       %s\n' "${public4:-unknown}"
-  if [[ -n "${src4}" && -n "${public4}" && "${src4}" != "${public4}" ]]; then
-    echo "IPv4 NAT/cloud edge detected. Make sure mtg access links use the public IP."
-  fi
-
-  printf 'local IPv6 source: %s\n' "${src6:-unknown}"
-  printf 'public IPv6:       %s\n' "${public6:-unknown}"
-
-  echo
-  echo "== Local listeners =="
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltnp 2>/dev/null | awk -v port=":${PORT}" '$4 ~ port "$" { print }'
-  else
-    echo "ss is not installed"
-  fi
+healthcheck() {
+  local mode="$1"
+  docker exec "${CONTAINER_NAME}" /app/telemt healthcheck /app/config.toml --mode "${mode}"
 }
 
 tcp_check() {
-  local host="$1"
-  local start end elapsed
+  local host="$1" port="$2" label="$3" start end elapsed
   start="$(date +%s%3N 2>/dev/null || date +%s)"
-  if timeout 4 bash -c ":</dev/tcp/${host}/443" 2>/dev/null; then
+  if timeout 5 bash -c "</dev/tcp/${host}/${port}" 2>/dev/null; then
     end="$(date +%s%3N 2>/dev/null || date +%s)"
     elapsed=$((end - start))
-    printf 'telegram dc %-16s tcp/443 ok %sms\n' "${host}" "${elapsed}"
-  else
-    printf 'telegram dc %-16s tcp/443 failed\n' "${host}"
+    printf '%-28s ok (%sms)\n' "${label}" "${elapsed}"
+    return 0
   fi
+  printf '%-28s failed\n' "${label}" >&2
+  return 1
+}
+
+doctor() {
+  local failed=0
+  echo "== service =="
+  if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    echo "service: active"
+  else
+    echo "service: failed"
+    failed=1
+  fi
+  docker inspect -f 'container: {{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' "${CONTAINER_NAME}" 2>/dev/null \
+    || { echo "container: missing"; failed=1; }
+
+  echo
+  echo "== Telemt control plane =="
+  if healthcheck liveness; then
+    echo "liveness: ok"
+  else
+    echo "liveness: failed"
+    failed=1
+  fi
+  if healthcheck ready; then
+    echo "readiness: ok"
+  else
+    echo "readiness: failed"
+    failed=1
+  fi
+
+  echo
+  echo "== local listener =="
+  tcp_check 127.0.0.1 "${PORT}" "local TCP/${PORT}" || failed=1
+
+  echo
+  echo "== Telegram Direct-DC probes (informational) =="
+  tcp_check 149.154.175.50 443 "Telegram DC1 TCP/443" || true
+  tcp_check 149.154.167.51 443 "Telegram DC2 TCP/443" || true
+  tcp_check 149.154.175.100 443 "Telegram DC3 TCP/443" || true
+  tcp_check 149.154.167.91 443 "Telegram DC4 TCP/443" || true
+  tcp_check 91.108.56.183 443 "Telegram DC5 TCP/443" || true
+
+  if [[ "${failed}" -eq 0 ]]; then
+    echo
+    echo "Doctor: all critical checks passed"
+  else
+    echo
+    echo "Doctor: one or more critical checks failed" >&2
+  fi
+  return "${failed}"
 }
 
 speedtest() {
-  echo "== mtg doctor =="
-  doctor || true
+  echo "== Telegram TCP =="
+  tcp_check 149.154.175.50 443 "Telegram DC1 TCP/443" || true
+  tcp_check 149.154.167.51 443 "Telegram DC2 TCP/443" || true
+  tcp_check 149.154.175.100 443 "Telegram DC3 TCP/443" || true
+  tcp_check 149.154.167.91 443 "Telegram DC4 TCP/443" || true
+  tcp_check 91.108.56.183 443 "Telegram DC5 TCP/443" || true
   echo
-  echo "== Telegram TCP reachability =="
-  tcp_check 149.154.175.50
-  tcp_check 149.154.167.50
-  tcp_check 149.154.175.100
-  tcp_check 149.154.167.91
-  tcp_check 91.108.56.130
-  echo
-  echo "== VPS HTTPS download baseline =="
-  if command -v curl >/dev/null 2>&1; then
-    curl -L -o /dev/null -sS \
-      -w 'cloudflare 25MB: %{speed_download} bytes/s, total %{time_total}s\n' \
-      'https://speed.cloudflare.com/__down?bytes=25000000' || true
-  else
-    echo "curl is not installed"
-  fi
+  echo "== HTTPS baseline =="
+  curl -L -o /dev/null -sS --max-time 60 \
+    -w 'Cloudflare 25 MB: %{speed_download} bytes/s, total %{time_total}s\n' \
+    'https://speed.cloudflare.com/__down?bytes=25000000' || true
 }
 
-uninstall() {
-  local purge=0
-  if [[ "${1:-}" == "--purge" ]]; then
-    purge=1
-  fi
-
-  systemctl disable --now "${SERVICE_NAME}" || true
-  docker rm -f "${CONTAINER_NAME}" || true
-  rm -f "/etc/systemd/system/${SERVICE_NAME}" /usr/local/bin/mtgctl
-  systemctl daemon-reload
-
-  if [[ "${purge}" -eq 1 ]]; then
-    rm -rf /etc/mtg
-    echo "Removed service, container and /etc/mtg"
-  else
-    echo "Removed service and container. Config kept in /etc/mtg"
-  fi
+bbr_nat() {
+  local cc qdisc src4 public4
+  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+  qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+  src4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}' || true)"
+  public4="$(curl -4 -fsS --max-time 6 https://api.ipify.org 2>/dev/null || true)"
+  printf 'tcp_congestion_control: %s\n' "${cc:-unknown}"
+  printf 'default_qdisc:          %s\n' "${qdisc:-unknown}"
+  printf 'local IPv4 source:      %s\n' "${src4:-unknown}"
+  printf 'public IPv4:            %s\n' "${public4:-unknown}"
+  echo
+  ss -ltnp 2>/dev/null | awk -v port=":${PORT}" '$4 ~ port "$" {print}' || true
 }
 
 cmd="${1:-status}"
-need_root_for "${cmd}"
-
 case "${cmd}" in
   status)
     systemctl status "${SERVICE_NAME}" --no-pager || true
-    docker ps --filter "name=${CONTAINER_NAME}" || true
+    docker ps -a --filter "name=^/${CONTAINER_NAME}$" || true
     ;;
   logs)
     journalctl -u "${SERVICE_NAME}" -n "${2:-100}" --no-pager
@@ -1483,349 +754,400 @@ case "${cmd}" in
     doctor
     ;;
   access)
-    access_info --no-qr
+    access "${2:-}"
     ;;
   qr)
-    access_info
+    qr "${2:-}"
     ;;
-  raw-access)
-    access_info --raw --no-qr
+  users)
+    awk -F'\t' 'NF >= 2 {printf "%d) %s  created=%s\n", ++n, $1, $3}' "${USERS_FILE}"
     ;;
-  bbr-nat)
-    bbr_nat_check
+  add)
+    need_root
+    label="${2:-}"
+    [[ -n "${label}" ]] || { echo "Usage: mtgctl add LABEL [SECRET]" >&2; exit 1; }
+    secret="${3:-$(generate_secret)}"
+    upsert_user "${label}" "${secret}"
+    rewrite_config_users
+    systemctl restart "${SERVICE_NAME}"
+    sleep 2
+    access "${label}"
+    ;;
+  revoke)
+    need_root
+    label="${2:-}"
+    [[ -n "${label}" ]] || { echo "Usage: mtgctl revoke LABEL" >&2; exit 1; }
+    [[ "$(user_count)" -gt 1 ]] || { echo "Refusing to revoke the last secret" >&2; exit 1; }
+    [[ -n "$(user_secret "${label}")" ]] || { echo "Unknown user: ${label}" >&2; exit 1; }
+    tmp="$(mktemp)"
+    awk -F'\t' -v label="${label}" 'BEGIN{OFS=FS} NF >= 2 && $1 != label {print}' "${USERS_FILE}" > "${tmp}"
+    mv "${tmp}" "${USERS_FILE}"
+    chmod 0600 "${USERS_FILE}"
+    rewrite_config_users
+    systemctl restart "${SERVICE_NAME}"
+    ;;
+  regenerate)
+    need_root
+    label="${2:-}"
+    [[ -n "${label}" ]] || { echo "Usage: mtgctl regenerate LABEL" >&2; exit 1; }
+    [[ -n "$(user_secret "${label}")" ]] || { echo "Unknown user: ${label}" >&2; exit 1; }
+    upsert_user "${label}" "$(generate_secret)"
+    rewrite_config_users
+    systemctl restart "${SERVICE_NAME}"
+    sleep 2
+    access "${label}"
     ;;
   speedtest)
     speedtest
     ;;
-  restart)
+  bbr-nat)
+    bbr_nat
+    ;;
+  update)
+    need_root
+    docker pull "${TELEMT_IMAGE}"
     systemctl restart "${SERVICE_NAME}"
     ;;
-  stop)
-    systemctl stop "${SERVICE_NAME}"
-    ;;
-  start)
-    systemctl start "${SERVICE_NAME}"
+  restart|start|stop)
+    need_root
+    systemctl "${cmd}" "${SERVICE_NAME}"
     ;;
   uninstall)
-    uninstall "${2:-}"
+    need_root
+    systemctl disable --now "${SERVICE_NAME}" || true
+    docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    rm -f "${SYSTEMD_FILE}" "${CONTROL_BIN}"
+    systemctl daemon-reload
+    if [[ "${2:-}" == "--purge" ]]; then
+      rm -rf "${CONFIG_DIR}"
+      echo "Removed service, container and ${CONFIG_DIR}"
+    else
+      echo "Removed service and container; configuration kept in ${CONFIG_DIR}"
+    fi
     ;;
   help|-h|--help)
     usage
     ;;
   *)
-    usage
+    usage >&2
     exit 1
     ;;
 esac
-EOF
-
+CONTROL_EOF
   chmod 0755 "${CONTROL_BIN}"
 }
 
-bbr_nat_check() {
-  local cc qdisc src4 src6 public4 public6
-
-  echo "== BBR / TCP =="
-  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-  qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
-  printf 'tcp_congestion_control: %s\n' "${cc:-unknown}"
-  printf 'default_qdisc:          %s\n' "${qdisc:-unknown}"
-  if [[ "${cc}" == "bbr" ]]; then
-    echo "BBR: enabled"
-  else
-    cat <<'TIP'
-BBR: not enabled. Optional commands:
-  echo "net.core.default_qdisc=fq" | sudo tee /etc/sysctl.d/99-clean-mtg-bbr.conf
-  echo "net.ipv4.tcp_congestion_control=bbr" | sudo tee -a /etc/sysctl.d/99-clean-mtg-bbr.conf
-  sudo sysctl --system
-TIP
+stop_conflicting_services() {
+  if systemctl list-unit-files "${SERVICE_NAME}" >/dev/null 2>&1; then
+    systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
   fi
 
-  echo
-  echo "== NAT / public IP =="
-  src4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }' || true)"
-  src6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }' || true)"
-  if cmd_exists curl; then
-    public4="$(curl -4 -fsS --max-time 5 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
-    public6="$(curl -6 -fsS --max-time 5 https://ifconfig.co/ip 2>/dev/null | tr -d '\r\n ' || true)"
-  else
-    public4=""
-    public6=""
-  fi
-
-  printf 'local IPv4 source: %s\n' "${src4:-unknown}"
-  printf 'public IPv4:       %s\n' "${public4:-unknown}"
-  if [[ -n "${src4}" && -n "${public4}" && "${src4}" != "${public4}" ]]; then
-    echo "IPv4 NAT/cloud edge detected. Make sure mtg access links use the public IP."
-  fi
-
-  printf 'local IPv6 source: %s\n' "${src6:-unknown}"
-  printf 'public IPv6:       %s\n' "${public6:-unknown}"
-
-  echo
-  echo "== Local listeners =="
-  if cmd_exists ss; then
-    ss -ltnp 2>/dev/null | awk -v port=":${PORT}" '$4 ~ port "$" { print }'
-  else
-    echo "ss is not installed"
-  fi
-}
-
-run_bbr_nat_check() {
-  [[ "${RUN_BBR_NAT_CHECK}" -eq 1 ]] || return
-  log "Running optional BBR/NAT diagnostics"
-  if [[ -x "${CONTROL_BIN}" ]]; then
-    "${CONTROL_BIN}" bbr-nat || true
-  else
-    bbr_nat_check || true
-  fi
-}
-
-install_nginx_package() {
-  local pm
-  pm="$(detect_pkg_manager)"
-
-  if cmd_exists nginx; then
-    return
-  fi
-
-  log "Installing Nginx (${pm})"
-  case "${pm}" in
-    apt)
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update
-      apt-get install -y nginx
-      ;;
-    dnf)
-      dnf install -y nginx
-      ;;
-    yum)
-      yum install -y nginx
-      ;;
-    *)
-      die "Cannot install Nginx automatically on this OS"
-      ;;
-  esac
-}
-
-open_disguise_firewall() {
-  [[ "${CONFIGURE_FIREWALL}" -eq 1 ]] || return
-
-  if cmd_exists ufw && ufw status 2>/dev/null | grep -qi "Status: active"; then
-    ufw allow "${DISGUISE_HTTP_PORT}/tcp" comment "clean mtg nginx disguise"
-    return
-  fi
-
-  if cmd_exists firewall-cmd && systemctl is-active --quiet firewalld; then
-    firewall-cmd --add-port="${DISGUISE_HTTP_PORT}/tcp" --permanent
-    firewall-cmd --reload
-  fi
-}
-
-configure_nginx_disguise() {
-  local server_name
-
-  if [[ "${ENABLE_NGINX_DISGUISE}" -ne 1 ]]; then
-    if [[ -f "${NGINX_SITE_FILE}" ]]; then
-      log "Disabling Nginx disguise profile"
-      rm -f "${NGINX_SITE_FILE}"
-      if cmd_exists nginx; then
-        if nginx -t; then
-          systemctl reload nginx || true
-        fi
-      fi
+  if systemctl list-unit-files "${LEGACY_SERVICE_NAME}" >/dev/null 2>&1; then
+    if systemctl is-active --quiet "${LEGACY_SERVICE_NAME}" || systemctl is-enabled --quiet "${LEGACY_SERVICE_NAME}" 2>/dev/null; then
+      warn "Disabling legacy ${LEGACY_SERVICE_NAME}; /etc/mtg is kept as a backup"
+      systemctl disable --now "${LEGACY_SERVICE_NAME}" >/dev/null 2>&1 || true
     fi
-    return
   fi
 
-  install_nginx_package
-  log "Writing Nginx disguise profile"
-  mkdir -p "${NGINX_WEB_ROOT}"
-  server_name="${DISGUISE_SERVER_NAME}"
-  if [[ "${server_name}" == "_" && -n "${DOMAIN}" ]]; then
-    server_name="${DOMAIN}"
+  docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+  docker rm -f "${LEGACY_CONTAINER_NAME}" >/dev/null 2>&1 || true
+  if docker inspect "${ALTERNATE_CONTAINER_NAME}" >/dev/null 2>&1; then
+    warn "Stopping alternate ${ALTERNATE_CONTAINER_NAME} container; it is kept for rollback"
+    docker stop "${ALTERNATE_CONTAINER_NAME}" >/dev/null 2>&1 || true
   fi
-
-  cat > "${NGINX_WEB_ROOT}/index.html" <<'EOF'
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="robots" content="noindex,nofollow">
-  <title>OK</title>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 3rem; color: #1f2937; }
-    main { max-width: 42rem; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>OK</h1>
-    <p>This service is running.</p>
-  </main>
-</body>
-</html>
-EOF
-
-  cat > "${NGINX_SITE_FILE}" <<EOF
-server {
-    listen ${DISGUISE_HTTP_PORT};
-    listen [::]:${DISGUISE_HTTP_PORT};
-    server_name ${server_name};
-
-    root ${NGINX_WEB_ROOT};
-    index index.html;
-
-    add_header X-Robots-Tag "noindex, nofollow" always;
-
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
 }
-EOF
 
-  nginx -t
-  systemctl enable --now nginx
-  systemctl reload nginx
-  open_disguise_firewall
+check_port_available() {
+  local listeners
+  listeners="$(ss -ltnp 2>/dev/null | awk -v port=":${PORT}" '$4 ~ port "$" {print}' || true)"
+  if [[ -n "${listeners}" ]]; then
+    printf '%s\n' "${listeners}" >&2
+    die "TCP/${PORT} is already occupied by another process"
+  fi
 }
 
 configure_firewall() {
-  [[ "${CONFIGURE_FIREWALL}" -eq 1 ]] || {
-    warn "Firewall configuration skipped"
-    return
-  }
-
+  [[ "${CONFIGURE_FIREWALL}" -eq 1 ]] || { warn "Firewall changes skipped"; return; }
   log "Configuring firewall for TCP/${PORT}"
-
-  if cmd_exists ufw && ufw status 2>/dev/null | grep -qi "Status: active"; then
-    ufw allow "${PORT}/tcp" comment "mtg MTProto proxy"
+  if cmd_exists ufw && ufw status 2>/dev/null | grep -qi 'Status: active'; then
+    ufw allow "${PORT}/tcp" comment "clean MTProto proxy"
     return
   fi
-
   if cmd_exists firewall-cmd && systemctl is-active --quiet firewalld; then
     firewall-cmd --add-port="${PORT}/tcp" --permanent
     firewall-cmd --reload
     return
   fi
-
   if [[ "${IPTABLES_FALLBACK}" -eq 1 ]] && cmd_exists iptables; then
     if ! iptables -C INPUT -p tcp --dport "${PORT}" -j ACCEPT 2>/dev/null; then
       iptables -I INPUT -p tcp --dport "${PORT}" -j ACCEPT
-      warn "Added a non-persistent iptables rule. Use ufw/firewalld/cloud firewall for persistence."
     fi
+    warn "Added a non-persistent iptables rule"
     return
   fi
-
-  warn "No active ufw/firewalld detected. Open TCP/${PORT} in your VPS/cloud firewall if needed."
+  warn "No active ufw/firewalld found. Open TCP/${PORT} in the VPS provider firewall."
 }
 
-run_doctor() {
-  [[ "${RUN_DOCTOR}" -eq 1 ]] || {
-    warn "mtg doctor skipped"
-    return
-  }
-
-  log "Running mtg doctor"
-  if docker run --rm -v "${CONFIG_FILE}:/config.toml:ro" "nineseconds/mtg:${MTG_TAG}" doctor /config.toml; then
-    log "mtg doctor finished successfully"
-  else
-    if [[ "${STRICT_DOCTOR}" -eq 1 ]]; then
-      die "mtg doctor failed and --strict-doctor is enabled"
-    fi
-    warn "mtg doctor reported problems. Installation will continue; review output above."
-  fi
+pull_image() {
+  log "Pulling ${TELEMT_IMAGE}"
+  docker pull "${TELEMT_IMAGE}"
 }
 
 start_service() {
-  [[ "${START_SERVICE}" -eq 1 ]] || {
-    warn "Service start skipped"
-    return
-  }
-
+  [[ "${START_SERVICE}" -eq 1 ]] || { warn "Service start skipped"; return; }
   log "Starting ${SERVICE_NAME}"
   systemctl enable --now "${SERVICE_NAME}"
   sleep 3
-  systemctl is-active --quiet "${SERVICE_NAME}" || {
-    journalctl -u "${SERVICE_NAME}" -n 80 --no-pager || true
+  if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
+    journalctl -u "${SERVICE_NAME}" -n 100 --no-pager || true
     die "${SERVICE_NAME} did not start"
-  }
+  fi
+}
+
+wait_ready() {
+  [[ "${START_SERVICE}" -eq 1 ]] || return 0
+  for _ in {1..30}; do
+    if docker exec "${CONTAINER_NAME}" /app/telemt healthcheck /app/config.toml --mode ready >/dev/null 2>&1; then
+      log "Telemt is ready to relay Telegram traffic"
+      return 0
+    fi
+    sleep 1
+  done
+  docker logs --tail 100 "${CONTAINER_NAME}" 2>/dev/null || true
+  return 1
+}
+
+run_doctor() {
+  [[ "${RUN_DOCTOR}" -eq 1 && "${START_SERVICE}" -eq 1 ]] || return
+  log "Running end-to-end readiness checks"
+  if "${CONTROL_BIN}" doctor; then
+    return
+  fi
+  if [[ "${STRICT_DOCTOR}" -eq 1 ]]; then
+    die "Proxy is not ready; installation stopped before reporting success"
+  fi
+  warn "Doctor reported a problem"
+}
+
+run_optional_checks() {
+  if [[ "${RUN_BBR_NAT_CHECK}" -eq 1 ]]; then
+    "${CONTROL_BIN}" bbr-nat || true
+  fi
+  if [[ "${RUN_SPEEDTEST}" -eq 1 ]]; then
+    "${CONTROL_BIN}" speedtest || true
+  fi
 }
 
 show_access() {
   [[ "${START_SERVICE}" -eq 1 ]] || return
-
-  log "Access information"
-  if ! "${CONTROL_BIN}" access; then
-    warn "Could not generate access info yet. Try: sudo mtgctl access"
-  fi
-}
-
-run_speedtest() {
-  [[ "${RUN_SPEEDTEST}" -eq 1 && "${START_SERVICE}" -eq 1 ]] || return
-  log "Running basic speed/connectivity test"
-  "${CONTROL_BIN}" speedtest || warn "Speedtest finished with warnings"
-}
-
-summary() {
-  cat <<EOF
-
-Installed.
-
-Files:
-  Config:   ${CONFIG_FILE}
-  Service:  ${SYSTEMD_FILE}
-  Helper:   ${CONTROL_BIN}
-
-Commands:
-  sudo mtgctl status
-  sudo mtgctl logs
-  sudo mtgctl follow
-  sudo mtgctl doctor
-  sudo mtgctl access
-  sudo mtgctl qr
-  sudo mtgctl speedtest
-  sudo mtgctl bbr-nat
-
-If Telegram does not connect, also check your VPS provider firewall:
-  open TCP/${PORT}
-EOF
+  log "Proxy links"
+  "${CONTROL_BIN}" access
 }
 
 install_proxy() {
   install_packages
   ensure_docker
-  fake_tls_domain_preflight
-  generate_secret
-  store_secret "${ACTIVE_SECRET_LABEL:-default}" "${DOMAIN}" "${SECRET}"
+  ensure_public_host
+  validate_input
+  [[ "${LEGACY_OPTIONS_USED}" -eq 0 ]] || warn "Legacy FakeTLS options were ignored; secure mode uses no domain or Nginx"
+  pull_image
+  stop_conflicting_services
+  check_port_available
+  ensure_initial_user
   write_config
+  write_state
   write_systemd_unit
   write_control_script
   configure_firewall
-  configure_nginx_disguise
   start_service
+  if [[ "${RUN_DOCTOR}" -eq 1 && "${START_SERVICE}" -eq 1 ]]; then
+    if ! wait_ready; then
+      if [[ "${STRICT_DOCTOR}" -eq 1 ]]; then
+        die "Telemt did not become ready; inspect: sudo journalctl -u ${SERVICE_NAME} -n 100"
+      fi
+      warn "Telemt readiness timed out"
+    fi
+  fi
   run_doctor
   show_access
-  run_bbr_nat_check
-  run_speedtest
-  summary
+  run_optional_checks
+  cat <<EOF
+
+Installed successfully.
+
+  Service: ${SERVICE_NAME}
+  Config:  ${CONFIG_FILE}
+  Helper:  ${CONTROL_BIN}
+
+Useful commands:
+  sudo mtgctl status
+  sudo mtgctl doctor
+  sudo mtgctl access
+  sudo mtgctl qr
+  sudo mtgctl logs
+
+The old FakeTLS links are intentionally invalid after migration. Add the new
+dd link shown above to Telegram and remove the old proxy entry.
+EOF
+}
+
+prompt_value() {
+  local label="$1" variable="$2" default_value="$3" value
+  read -r -p "${label} [${default_value}]: " value
+  printf -v "${variable}" '%s' "${value:-${default_value}}"
+}
+
+prompt_yes_no() {
+  local label="$1" default_value="$2" answer
+  if [[ "${default_value}" -eq 1 ]]; then
+    read -r -p "${label} [Y/n]: " answer
+    [[ ! "${answer}" =~ ^([Nn]|[Nn][Oo])$ ]]
+  else
+    read -r -p "${label} [y/N]: " answer
+    [[ "${answer}" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]
+  fi
+}
+
+prompt_install_settings() {
+  load_state
+  prompt_value "Public port" PORT "${PORT:-443}"
+  prompt_value "Public IP or DNS (empty = auto-detect)" PUBLIC_HOST "${PUBLIC_HOST:-}"
+  prompt_value "Telemt image tag" TELEMT_TAG "${TELEMT_TAG:-3.4.23}"
+  TELEMT_IMAGE="ghcr.io/telemt/telemt:${TELEMT_TAG}"
+  if prompt_yes_no "Use Telegram Middle-End with Direct-DC fallback" "${USE_MIDDLE_PROXY:-1}"; then
+    USE_MIDDLE_PROXY=1
+  else
+    USE_MIDDLE_PROXY=0
+  fi
+  if prompt_yes_no "Prefer IPv6 upstreams" "${PREFER_IPV6:-0}"; then
+    PREFER_IPV6=1
+  else
+    PREFER_IPV6=0
+  fi
+}
+
+proxy_is_installed() {
+  [[ -f "${STATE_FILE}" && -f "${CONFIG_FILE}" && -x "${CONTROL_BIN}" ]]
+}
+
+menu_add_user() {
+  local label secret
+  proxy_is_installed || { warn "Install the proxy first"; return; }
+  load_state
+  prompt_value "New user label" label "family"
+  validate_label "${label}"
+  read -r -p "32-hex secret (empty = generate): " secret
+  [[ -n "${secret}" ]] || secret="$(generate_secret)"
+  upsert_user "${label}" "${secret}"
+  ensure_public_host
+  write_config
+  systemctl restart "${SERVICE_NAME}"
+  sleep 2
+  "${CONTROL_BIN}" access "${label}"
+}
+
+menu_revoke_user() {
+  local label
+  proxy_is_installed || { warn "Install the proxy first"; return; }
+  load_state
+  [[ "$(user_count)" -gt 1 ]] || { warn "The last secret cannot be revoked"; return; }
+  label="$(select_user_label)"
+  remove_user "${label}"
+  write_config
+  systemctl restart "${SERVICE_NAME}"
+  log "Revoked ${label}"
+}
+
+menu_regenerate_user() {
+  local label
+  proxy_is_installed || { warn "Install the proxy first"; return; }
+  load_state
+  label="$(select_user_label)"
+  upsert_user "${label}" "$(generate_secret)"
+  write_config
+  systemctl restart "${SERVICE_NAME}"
+  sleep 2
+  "${CONTROL_BIN}" access "${label}"
+}
+
+installer_uninstall() {
+  local purge=0 answer
+  read -r -p "Remove ${CONFIG_DIR} too? [y/N]: " answer
+  [[ "${answer}" =~ ^([Yy]|[Yy][Ee][Ss])$ ]] && purge=1
+  systemctl disable --now "${SERVICE_NAME}" || true
+  docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+  rm -f "${SYSTEMD_FILE}" "${CONTROL_BIN}"
+  systemctl daemon-reload
+  [[ "${purge}" -eq 0 ]] || rm -rf "${CONFIG_DIR}"
+  log "Proxy removed"
+}
+
+run_control_or_warn() {
+  if [[ -x "${CONTROL_BIN}" ]]; then
+    "${CONTROL_BIN}" "$@"
+  else
+    warn "Proxy is not installed"
+  fi
+}
+
+menu_loop() {
+  local choice
+  while true; do
+    clear || true
+    cat <<'EOF'
+Clean MTProto Proxy
+
+1) Install / update proxy
+2) Show status
+3) Show proxy links + QR
+4) Show logs
+5) Run doctor
+6) Add secret
+7) Revoke secret
+8) Regenerate secret
+9) Run speed test
+10) Run BBR/NAT diagnostics
+11) Restart proxy
+12) Update container image
+13) Remove proxy
+0) Exit
+EOF
+    read -r -p "Choose option: " choice
+    case "${choice}" in
+      1) prompt_install_settings; install_proxy; pause ;;
+      2) run_control_or_warn status; pause ;;
+      3) run_control_or_warn qr; pause ;;
+      4) run_control_or_warn logs; pause ;;
+      5) run_control_or_warn doctor; pause ;;
+      6) menu_add_user; pause ;;
+      7) menu_revoke_user; pause ;;
+      8) menu_regenerate_user; pause ;;
+      9) run_control_or_warn speedtest; pause ;;
+      10) run_control_or_warn bbr-nat; pause ;;
+      11) run_control_or_warn restart; pause ;;
+      12) run_control_or_warn update; pause ;;
+      13) installer_uninstall; pause ;;
+      0) exit 0 ;;
+      *) warn "Unknown option"; pause ;;
+    esac
+  done
 }
 
 main() {
-  if [[ "$#" -eq 0 && -t 0 && -t 1 && -z "${DOMAIN}" ]]; then
+  if [[ "$#" -eq 0 && -t 0 && -t 1 ]]; then
     require_root
     menu_loop
   fi
 
-  if [[ -z "${DOMAIN}" && -f "${STATE_FILE}" ]]; then
+  if [[ -f "${STATE_FILE}" ]]; then
     load_state
   fi
-
   parse_args "$@"
   require_root
   validate_input
   install_proxy
 }
 
-main "$@"
+if [[ "${CLEAN_MTG_TEST_MODE:-0}" != "1" ]]; then
+  main "$@"
+fi

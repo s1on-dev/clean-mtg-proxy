@@ -1,206 +1,229 @@
-# Clean MTG Proxy Installer
+# Clean MTProto Proxy
 
-Чистый установщик MTProto-прокси для Telegram на базе `nineseconds/mtg` v2.
-По умолчанию используется закрепленный Docker-тег `2.2.8`.
+Чистый установщик MTProto-прокси для Telegram без рекламы. Проект использует
+актуальный `telemt` в режиме Secure (`dd`) и запускает его через Docker + systemd.
 
-Цель проекта: один понятный скрипт для любого обычного Linux VPS без рекламы,
-с нормальным Docker/systemd-запуском, firewall, `mtg doctor`, логами, QR-кодом,
-speedtest, BBR/NAT-диагностикой и безопасной ротацией secret.
+Главное отличие от старых версий проекта: FakeTLS, `sslip.io`, domain fronting и
+Nginx больше не участвуют в передаче сообщений. Это устраняет петлю
+`VPS:443 -> fronting domain -> VPS:443`, из-за которой Telegram показывал
+«подключён», но сообщения не отправлялись.
 
-## Быстрая установка
+## Возможности
 
-Стабильная команда для релиза `v1.0.3`:
+- Secure MTProto с обязательным префиксом `dd`;
+- несколько одновременно активных секретов;
+- меню установки и управления;
+- systemd-сервис с Docker-контейнером;
+- локальный firewall для `ufw` и `firewalld`;
+- readiness-проверка канала до Telegram перед успешным завершением установки;
+- ссылки `tg://` и `https://t.me`, локальный QR-код;
+- логи с ротацией;
+- диагностика Telegram DC, BBR/NAT и базовый speed test;
+- обновление, перезапуск и полное удаление.
+
+Реклама не настраивается: `ad_tag` отсутствует в конфигурации.
+
+## Установка
+
+На Ubuntu/Debian VPS:
 
 ```bash
-curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.3/install.sh
-sudo bash install.sh
+cd /root
+curl -4 --tlsv1.2 -fsSL \
+  -o install.sh \
+  https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/main/install.sh
+chmod +x install.sh
+sudo ./install.sh
 ```
 
-Последняя версия из `main`:
+Откроется меню. Выберите `1) Install / update proxy`.
+
+Тихая установка без меню:
 
 ```bash
-curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/main/install.sh
-sudo bash install.sh
+sudo ./install.sh --port 443 --server 144.31.188.19
 ```
 
-Быстрая установка без меню:
+`--server` можно не указывать: установщик попробует определить публичный IPv4
+автоматически.
+
+Если `raw.githubusercontent.com` недоступен через `curl`, используйте:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.3/install.sh \
-  | sudo bash -s -- --domain proxy.your-domain.com --port 443
+wget -4 -O install.sh \
+  https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/main/install.sh
+chmod +x install.sh
+sudo ./install.sh
 ```
 
-Замените `proxy.your-domain.com` на домен, которым вы управляете. Он должен
-резолвиться A-записью в публичный IPv4 вашего VPS. Не используйте
-`example.com`, `digitalocean.com`, `hetzner.com` или другие чужие домены.
+## Миграция со старого mtg
 
-`--domain` нужен для FakeTLS-secret. Самый надежный вариант - домен, которым вы
-управляете, с A-записью на публичный IPv4 VPS и реальным HTTPS-сайтом на `443`.
-Случайный CDN/сайт может работать хуже: `mtg doctor` покажет SNI-DNS mismatch,
-если домен резолвится не в IP вашего VPS.
+Повторная установка автоматически:
+
+1. останавливает и отключает старый `mtg.service`;
+2. удаляет старый контейнер `mtg-proxy`;
+3. останавливает альтернативный `mtprotoproxy`, сохраняя контейнер для отката;
+4. сохраняет `/etc/mtg` как резервную копию;
+5. создаёт новый `telemt-proxy.service`;
+6. генерирует новый Secure-секрет;
+7. ждёт readiness и только затем показывает новую ссылку.
+
+Старые `ee`/FakeTLS-ссылки после миграции использовать нельзя. В Telegram нужно
+удалить старую запись прокси и добавить новую ссылку с `secret=dd...`.
 
 ## Меню
 
-При запуске `sudo bash install.sh` без параметров откроется меню:
+```text
+1) Install / update proxy
+2) Show status
+3) Show proxy links + QR
+4) Show logs
+5) Run doctor
+6) Add secret
+7) Revoke secret
+8) Regenerate secret
+9) Run speed test
+10) Run BBR/NAT diagnostics
+11) Restart proxy
+12) Update container image
+13) Remove proxy
+0) Exit
+```
 
-- установка или обновление прокси;
-- изменение домена, порта, Docker-тега, IP-режима, DNS и лимитов;
-- вывод `tg://proxy` ссылки и QR-кода;
-- статус, логи, `mtg doctor`, speedtest;
-- BBR/NAT-диагностика;
-- Add / switch secret;
-- Revoke secret;
-- Regenerate active secret;
-- настройка Nginx disguise и IP allowlist;
-- перезапуск и удаление.
-
-Важно: upstream `mtg` v2 поддерживает один активный secret. Установщик хранит
-список сохраненных secret в `/etc/mtg/secrets.tsv`, но в `config.toml` активным
-становится только один. Это сделано для совместимости с чистым `nineseconds/mtg`.
+Telemt поддерживает несколько секретов одновременно. Поэтому добавление нового
+секрета не отключает старых пользователей. Последний оставшийся секрет удалить
+нельзя, но его можно перегенерировать.
 
 ## Управление
 
 ```bash
 sudo mtgctl status
-sudo mtgctl logs
-sudo mtgctl follow
 sudo mtgctl doctor
 sudo mtgctl access
 sudo mtgctl qr
+sudo mtgctl logs
+sudo mtgctl follow
+sudo mtgctl users
 sudo mtgctl speedtest
 sudo mtgctl bbr-nat
 sudo mtgctl restart
-sudo mtgctl uninstall
+sudo mtgctl update
 ```
 
-`sudo mtgctl access` выводит только ссылку. `sudo mtgctl qr` выводит ссылку и
-локальный QR-код. Если `qrencode` недоступен в репозиториях ОС, ссылка все равно
-будет показана, а QR можно включить позже:
-
-Ссылка строится с HEX-secret, это наиболее совместимый формат для Telegram.
+Управление секретами:
 
 ```bash
-sudo apt-get install -y qrencode
-sudo mtgctl qr
+sudo mtgctl add family
+sudo mtgctl add phone 0123456789abcdef0123456789abcdef
+sudo mtgctl regenerate family
+sudo mtgctl revoke phone
 ```
 
-## Полезные флаги
+## Проверка работоспособности
 
 ```bash
-sudo bash install.sh --domain proxy.your-domain.com --port 443
-sudo bash install.sh --domain proxy.your-domain.com --prefer-ip prefer-ipv4 --concurrency 16384
-sudo bash install.sh --domain proxy.your-domain.com --secret-label family
-sudo bash install.sh --domain proxy.your-domain.com --allowlist "203.0.113.10/32,198.51.100.0/24"
-sudo bash install.sh --domain proxy.your-domain.com --nginx-disguise --disguise-port 80
-sudo bash install.sh --domain proxy.your-domain.com --disable-nginx-disguise
-sudo bash install.sh --domain 144.31.188.19.sslip.io --fronting-host www.cloudflare.com --disable-nginx-disguise
-sudo bash install.sh --domain proxy.your-domain.com --bbr-nat-check
-sudo bash install.sh --domain proxy.your-domain.com --enable-blocklist
-sudo bash install.sh --domain proxy.your-domain.com --blocklist https://iplists.firehol.org/files/firehol_abusers_1d.netset
-sudo bash install.sh --domain proxy.your-domain.com --strict-doctor
-sudo bash install.sh --domain proxy.your-domain.com --skip-firewall
-sudo bash install.sh --domain proxy.your-domain.com --skip-docker-install
+sudo mtgctl doctor
 ```
 
-## Nginx Disguise И Allowlist
+Успешная проверка подтверждает:
 
-Nginx disguise профиль ставит тихую HTTP-страницу на отдельный порт, обычно
-`80/tcp`. Он не занимает порт MTProto-прокси, поэтому не конфликтует с `443/tcp`.
-Для совместного HTTPS/SNI-мультиплексирования нужен отдельный SNI-router или
-HAProxy-профиль, это сознательно не включено в чистый установщик.
+- активный systemd-сервис;
+- запущенный Docker-контейнер;
+- Telemt liveness;
+- Telemt readiness, включая готовность upstream-маршрута;
+- локальный listener на публичном порту;
+- readiness рабочего upstream-маршрута; прямые TCP-пробы Telegram DC 1-5
+  выводятся дополнительно и не отменяют готовность Middle-End.
 
-IP allowlist включается внутри `mtg` через `[defense.allowlist]` и файл
-`/etc/mtg/allowlist.netset`. Клиенты вне указанных CIDR будут отклоняться.
-
-Если для теста используется `sslip.io` или другой домен, который резолвится в
-тот же IP, где слушает `mtg`, добавьте `--fronting-host HOST`. Иначе
-отклоненный/probe-трафик может уходить обратно в `mtg:443` и создавать
-`cannot dial to the fronting domain`.
-
-## Логи
+После установки также полезно проверить:
 
 ```bash
-sudo journalctl -u mtg.service -n 100 --no-pager
-sudo journalctl -u mtg.service -f
+sudo ss -ltnp | grep ':443'
+sudo docker logs --tail 100 telemt-proxy
 ```
 
-Короткий вариант:
+Нормальная ссылка выглядит так:
+
+```text
+tg://proxy?server=144.31.188.19&port=443&secret=dd<32-hex-secret>
+```
+
+## Параметры
 
 ```bash
-sudo mtgctl logs
-sudo mtgctl follow
+sudo ./install.sh --port 443
+sudo ./install.sh --server 144.31.188.19
+sudo ./install.sh --secret-label family
+sudo ./install.sh --secret 0123456789abcdef0123456789abcdef
+sudo ./install.sh --tag 3.4.23
+sudo ./install.sh --prefer-ipv6
+sudo ./install.sh --direct
+sudo ./install.sh --middle-proxy
+sudo ./install.sh --bbr-nat-check
+sudo ./install.sh --speedtest
+sudo ./install.sh --skip-firewall
+sudo ./install.sh --iptables-fallback
+sudo ./install.sh --no-strict-doctor
 ```
 
-Docker-логи ограничены ротацией `10m x 5`, чтобы VPS не заполнялся логами.
+По умолчанию включён Telegram Middle-End с автоматическим Direct-DC fallback.
+Флаг `--direct` полезен только для диагностики: direct mode может иметь ограничения
+для отдельных видов медиа. Для обычной работы оставляйте `--middle-proxy`.
+
+Старые параметры `--domain`, `--fronting-host`, `--disable-blocklist` и
+`--disable-nginx-disguise` принимаются для совместимости, но игнорируются.
 
 ## Firewall
 
-Скрипт открывает TCP-порт прокси в активном `ufw` или `firewalld`. Если включен
-Nginx disguise, он также открывает HTTP-порт disguise-профиля.
+Установщик открывает выбранный TCP-порт в активном `ufw` или `firewalld`.
+Если firewall управляется в панели VPS-провайдера, откройте там тот же порт:
 
-Если у VPS есть внешний cloud firewall в панели провайдера, откройте там тот же
-порт, обычно `443/tcp`.
-
-Для временного iptables-правила можно использовать:
-
-```bash
-sudo bash install.sh --domain proxy.your-domain.com --iptables-fallback
+```text
+Protocol: TCP
+Port:     443
+Source:   0.0.0.0/0
 ```
 
-## Blocklist
+`--iptables-fallback` создаёт только временное правило, которое может исчезнуть
+после перезагрузки.
 
-Blocklist по умолчанию выключен. Его можно включить через меню или флаг
-`--enable-blocklist`. Флаг `--blocklist URL` задает FireHOL-compatible список и
-тоже включает blocklist.
+## Файлы
 
-Если клиентский IP попадает в blocklist, `mtg` отправляет подключение в
-domain-fronting fallback. Это может выглядеть как "подключено, но сообщения не
-отправляются", поэтому для личного прокси безопаснее начинать с выключенного
-blocklist и включать его только осознанно.
+```text
+/etc/clean-mtg-proxy/config.toml   Telemt config (root:65532, mode 0640)
+/etc/clean-mtg-proxy/users.tsv    secrets (mode 0600)
+/etc/clean-mtg-proxy/install.env  installer state (mode 0600)
+/etc/systemd/system/telemt-proxy.service
+/usr/local/bin/mtgctl
+```
 
-## Скорость И Диагностика
-
-`sudo mtgctl speedtest` проверяет:
-
-- `mtg doctor`;
-- TCP-доступность нескольких Telegram DC на `443`;
-- базовую HTTPS-скорость исходящего канала VPS через Cloudflare 25 MB.
-
-`sudo mtgctl bbr-nat` показывает:
-
-- текущий TCP congestion control;
-- включен ли BBR;
-- локальный и публичный IPv4/IPv6;
-- возможный NAT/cloud edge;
-- локальные listener-порты.
-
-MTProxy не ускоряет Telegram сам по себе. Он помогает, когда прямой маршрут до
-Telegram блокируется, режется или плохо маршрутизируется.
+Docker-образ закреплён на `ghcr.io/telemt/telemt:3.4.23`. Образ multi-arch и
+поддерживает `amd64` и `arm64`.
 
 ## Удаление
 
-Оставить конфиг:
+Оставить конфигурацию:
 
 ```bash
 sudo mtgctl uninstall
 ```
 
-Удалить также `/etc/mtg`:
+Удалить также секреты и конфигурацию:
 
 ```bash
 sudo mtgctl uninstall --purge
 ```
 
-## Безопасный Запуск
+## Разработка
 
-Перед запуском на сервере можно скачать и посмотреть скрипт:
+Локальные проверки:
 
 ```bash
-curl -fsSL -o install.sh https://raw.githubusercontent.com/s1on-dev/clean-mtg-proxy/v1.0.3/install.sh
-less install.sh
-sudo bash install.sh
+bash -n install.sh
+bash tests/test_install.sh
+shellcheck install.sh tests/test_install.sh
 ```
 
-CI проверяет `install.sh`, встроенный `mtgctl` helper и ShellCheck.
-
-Архитектура описана в [ARCHITECTURE.md](ARCHITECTURE.md).
+GitHub Actions дополнительно извлекает встроенный `mtgctl`, проверяет его через
+`bash -n` и ShellCheck, а также разбирает сгенерированный TOML через Python
+`tomllib`.
