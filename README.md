@@ -159,6 +159,7 @@ sudo ./install.sh --tag 3.4.23
 sudo ./install.sh --prefer-ipv6
 sudo ./install.sh --direct
 sudo ./install.sh --middle-proxy
+sudo ./install.sh --enable-bbr
 sudo ./install.sh --bbr-nat-check
 sudo ./install.sh --speedtest
 sudo ./install.sh --skip-firewall
@@ -166,9 +167,11 @@ sudo ./install.sh --iptables-fallback
 sudo ./install.sh --no-strict-doctor
 ```
 
-По умолчанию включён Telegram Middle-End с автоматическим Direct-DC fallback.
-Флаг `--direct` полезен только для диагностики: direct mode может иметь ограничения
-для отдельных видов медиа. Для обычной работы оставляйте `--middle-proxy`.
+По умолчанию включён Direct-DC: он устраняет лишний промежуточный маршрут и обычно
+быстрее передаёт медиа. `--middle-proxy` включает Telegram Middle-End с Direct-DC
+fallback, если такой маршрут лучше работает у конкретного VPS-провайдера.
+Флаг `--enable-bbr` включает BBR и очередь `fq`; это может повысить скорость на
+каналах с потерями, но не отменяет ограничение пропускной способности VPS.
 
 Старые параметры `--domain`, `--fronting-host`, `--disable-blocklist` и
 `--disable-nginx-disguise` принимаются для совместимости, но игнорируются.

@@ -9,6 +9,9 @@ export CLEAN_MTG_TEST_MODE=1
 # shellcheck source=../install.sh
 source "${ROOT_DIR}/install.sh"
 
+[[ "${USE_MIDDLE_PROXY}" == "0" ]]
+[[ "${ENABLE_BBR}" == "0" ]]
+
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "${TEST_DIR}"' EXIT
 

@@ -20,7 +20,7 @@ SECRET_LABEL="${SECRET_LABEL:-default}"
 TELEMT_TAG="${TELEMT_TAG:-3.4.23}"
 TELEMT_IMAGE="${TELEMT_IMAGE:-ghcr.io/telemt/telemt:${TELEMT_TAG}}"
 PREFER_IPV6="${PREFER_IPV6:-0}"
-USE_MIDDLE_PROXY="${USE_MIDDLE_PROXY:-1}"
+USE_MIDDLE_PROXY="${USE_MIDDLE_PROXY:-0}"
 ME2DC_FAST="${ME2DC_FAST:-1}"
 
 INSTALL_DOCKER=1
@@ -31,6 +31,7 @@ RUN_DOCTOR=1
 STRICT_DOCTOR=1
 RUN_SPEEDTEST=0
 RUN_BBR_NAT_CHECK=0
+ENABLE_BBR=0
 START_SERVICE=1
 BASE_PACKAGES_READY=0
 LEGACY_OPTIONS_USED=0
@@ -51,8 +52,9 @@ Options:
   --tag TAG                Telemt container tag, default: 3.4.23
   --image IMAGE            Full container image override
   --prefer-ipv6            Prefer IPv6 for Telegram upstream connections
-  --direct                 Disable Telegram Middle-End and use Direct-DC
-  --middle-proxy           Use Telegram Middle-End with Direct-DC fallback, default
+  --direct                 Use Direct-DC, default
+  --middle-proxy           Use Telegram Middle-End with Direct-DC fallback
+  --enable-bbr             Enable and persist BBR with the fq queue discipline
   --bbr-nat-check          Run optional BBR/NAT diagnostics
   --skip-docker-install    Require Docker to be installed already
   --no-docker-script       Do not fall back to https://get.docker.com
@@ -166,6 +168,8 @@ parse_args() {
         USE_MIDDLE_PROXY=0; shift ;;
       --middle-proxy)
         USE_MIDDLE_PROXY=1; shift ;;
+      --enable-bbr)
+        ENABLE_BBR=1; shift ;;
       --bbr-nat-check)
         RUN_BBR_NAT_CHECK=1; shift ;;
       --skip-docker-install)
@@ -938,6 +942,23 @@ run_optional_checks() {
   fi
 }
 
+enable_bbr() {
+  [[ "${ENABLE_BBR}" -eq 1 ]] || return 0
+  log "Enabling BBR congestion control with fq"
+  modprobe tcp_bbr 2>/dev/null || {
+    warn "Kernel module tcp_bbr is unavailable; leaving congestion control unchanged"
+    return 0
+  }
+  printf 'tcp_bbr\n' > /etc/modules-load.d/clean-mtg-proxy-bbr.conf
+  cat > /etc/sysctl.d/99-clean-mtg-proxy-performance.conf <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+  sysctl --system >/dev/null
+  [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == "bbr" ]] \
+    || warn "BBR was requested but is not active"
+}
+
 show_access() {
   [[ "${START_SERVICE}" -eq 1 ]] || return
   log "Proxy links"
@@ -959,6 +980,7 @@ install_proxy() {
   write_systemd_unit
   write_control_script
   configure_firewall
+  enable_bbr
   start_service
   if [[ "${RUN_DOCTOR}" -eq 1 && "${START_SERVICE}" -eq 1 ]]; then
     if ! wait_ready; then
@@ -1014,7 +1036,7 @@ prompt_install_settings() {
   prompt_value "Public IP or DNS (empty = auto-detect)" PUBLIC_HOST "${PUBLIC_HOST:-}"
   prompt_value "Telemt image tag" TELEMT_TAG "${TELEMT_TAG:-3.4.23}"
   TELEMT_IMAGE="ghcr.io/telemt/telemt:${TELEMT_TAG}"
-  if prompt_yes_no "Use Telegram Middle-End with Direct-DC fallback" "${USE_MIDDLE_PROXY:-1}"; then
+  if prompt_yes_no "Use Telegram Middle-End with Direct-DC fallback" "${USE_MIDDLE_PROXY:-0}"; then
     USE_MIDDLE_PROXY=1
   else
     USE_MIDDLE_PROXY=0

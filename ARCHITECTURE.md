@@ -40,7 +40,7 @@ domain-fronting backend. Прокси не пытается подключать
 
 ```toml
 [general]
-use_middle_proxy = true
+use_middle_proxy = false
 me2dc_fallback = true
 me2dc_fast = true
 
@@ -50,8 +50,9 @@ secure = true
 tls = false
 ```
 
-Новые соединения используют Telegram Middle-End. Если он ещё не готов или
-временно недоступен, Telemt может открыть Direct-DC маршрут. Это предотвращает
+Новые соединения по умолчанию используют прямой Direct-DC маршрут. Режим Telegram
+Middle-End можно включить флагом `--middle-proxy`, если он лучше работает у
+конкретного провайдера. Это предотвращает
 состояние, при котором TCP-соединение с VPS есть, а рабочей дороги до Telegram
 нет.
 
